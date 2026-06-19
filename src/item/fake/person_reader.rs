@@ -32,7 +32,9 @@ where
 {
     let format = format_description::parse_borrowed::<2>("[year]-[month]-[day]")
         .map_err(|e| Error::custom(e.to_string()))?;
-    let s = date.format(&format).map_err(|e| Error::custom(e.to_string()))?;
+    let s = date
+        .format(&format)
+        .map_err(|e| Error::custom(e.to_string()))?;
     serializer.serialize_str(&s)
 }
 
