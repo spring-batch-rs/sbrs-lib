@@ -28,15 +28,12 @@ fn date_serializer<S>(date: &Date, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    let result = format_description::parse("[year]-[month]-[day]");
-
-    match result {
-        Ok(format) => {
-            let s = date.format(&format).unwrap();
-            serializer.serialize_str(&s)
-        }
-        Err(error) => Err(Error::custom(error.to_string())),
-    }
+    let format = format_description::parse_borrowed::<2>("[year]-[month]-[day]")
+        .map_err(|e| Error::custom(e.to_string()))?;
+    let s = date
+        .format(&format)
+        .map_err(|e| Error::custom(e.to_string()))?;
+    serializer.serialize_str(&s)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

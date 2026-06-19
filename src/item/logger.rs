@@ -151,6 +151,7 @@ mod tests {
     #[test]
     fn test_write_with_custom_type() {
         #[derive(Debug)]
+        #[allow(dead_code)]
         struct Record {
             id: u32,
         }
