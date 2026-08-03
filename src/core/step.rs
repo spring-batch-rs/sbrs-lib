@@ -406,6 +406,53 @@ impl StepExecution {
             flush_duration: Duration::ZERO,
         }
     }
+
+    /// Formats the per-phase timing breakdown as a single human-readable line.
+    ///
+    /// Percentages are relative to the step's total [`StepExecution::duration`].
+    /// When `duration` is `None` or zero — for instance before the step has run —
+    /// every percentage is reported as `0%` rather than `NaN`.
+    ///
+    /// The four phases will not sum to exactly 100%: the remainder is framework
+    /// overhead. A large remainder is itself a useful signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use spring_batch_rs::core::step::StepExecution;
+    /// use std::time::Duration;
+    ///
+    /// let mut step_execution = StepExecution::new("load-postgres");
+    /// step_execution.duration = Some(Duration::from_secs(10));
+    /// step_execution.read_duration = Duration::from_secs(5);
+    ///
+    /// let summary = step_execution.phase_summary();
+    /// assert!(summary.contains("read 5.0s (50%)"));
+    /// ```
+    pub fn phase_summary(&self) -> String {
+        let total = self.duration.unwrap_or_default().as_secs_f64();
+        let pct = |d: Duration| -> f64 {
+            if total > 0.0 {
+                d.as_secs_f64() / total * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        format!(
+            "Step '{}' {:.1}s — read {:.1}s ({:.0}%) | process {:.1}s ({:.0}%) | write {:.1}s ({:.0}%) | flush {:.1}s ({:.0}%)",
+            self.name,
+            total,
+            self.read_duration.as_secs_f64(),
+            pct(self.read_duration),
+            self.process_duration.as_secs_f64(),
+            pct(self.process_duration),
+            self.write_duration.as_secs_f64(),
+            pct(self.write_duration),
+            self.flush_duration.as_secs_f64(),
+            pct(self.flush_duration),
+        )
+    }
 }
 
 /// Represents the overall status of a batch job.
@@ -671,6 +718,8 @@ impl<I, O> Step for ChunkOrientedStep<'_, I, O> {
         step_execution.start_time = Some(start_time);
         step_execution.end_time = Some(Instant::now());
         step_execution.duration = Some(start_time.elapsed());
+
+        info!("{}", step_execution.phase_summary());
 
         // Return the step execution details if the step is successful,
         // or an error if the step failed
@@ -1934,6 +1983,41 @@ mod tests {
         assert!(!step_execution.id.is_nil());
 
         Ok(())
+    }
+
+    #[test]
+    fn should_format_phase_summary_with_percentages() {
+        let mut step_execution = StepExecution::new("load-postgres");
+        step_execution.duration = Some(Duration::from_secs(10));
+        step_execution.read_duration = Duration::from_secs(5);
+        step_execution.process_duration = Duration::from_secs(1);
+        step_execution.write_duration = Duration::from_secs(3);
+        step_execution.flush_duration = Duration::from_secs(1);
+
+        let summary = step_execution.phase_summary();
+
+        assert!(summary.contains("load-postgres"), "summary: {summary}");
+        assert!(summary.contains("read 5.0s (50%)"), "summary: {summary}");
+        assert!(summary.contains("process 1.0s (10%)"), "summary: {summary}");
+        assert!(summary.contains("write 3.0s (30%)"), "summary: {summary}");
+        assert!(summary.contains("flush 1.0s (10%)"), "summary: {summary}");
+    }
+
+    #[test]
+    fn should_report_zero_percentages_when_duration_is_unset() {
+        let step_execution = StepExecution::new("never-ran");
+
+        let summary = step_execution.phase_summary();
+
+        assert!(summary.contains("(0%)"), "summary: {summary}");
+        assert!(
+            !summary.contains("NaN"),
+            "division by zero leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("inf"),
+            "division by zero leaked: {summary}"
+        );
     }
 
     #[test]
