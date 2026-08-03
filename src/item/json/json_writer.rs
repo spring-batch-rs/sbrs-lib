@@ -101,8 +101,10 @@ impl<O: serde::Serialize, W: Write> ItemWriter<O> for JsonItemWriter<O, W> {
                 serde_json::to_string(item).map_err(|e| BatchError::ItemWriter(e.to_string()))
             };
 
-            let json_str = result?;
-            json_chunk.push_str(&json_str);
+            match result {
+                Ok(json_str) => json_chunk.push_str(&json_str),
+                Err(e) => return Err(e),
+            }
 
             if self.use_pretty_formatter {
                 json_chunk.push('\n');
