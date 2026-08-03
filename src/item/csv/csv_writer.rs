@@ -202,6 +202,62 @@ impl<O: Serialize, W: Write> ItemWriter<O> for CsvItemWriter<O, W> {
             Err(error) => Err(BatchError::ItemWriter(error.to_string())),
         }
     }
+
+    /// Prepares the writer. CSV has no header ceremony to emit here — headers are
+    /// written lazily by the underlying `csv::Writer` on the first record — so this
+    /// is an explicit no-op provided for symmetry with the JSON and XML writers.
+    ///
+    /// # Returns
+    /// - `Ok(())` always
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::csv::csv_writer::CsvItemWriterBuilder;
+    /// use spring_batch_rs::core::item::ItemWriter;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct Record { id: u32 }
+    ///
+    /// let mut buffer = Vec::new();
+    /// let writer = CsvItemWriterBuilder::<Record>::new().from_writer(&mut buffer);
+    /// assert!(ItemWriter::<Record>::open(&writer).is_ok());
+    /// ```
+    fn open(&self) -> ItemWriterResult {
+        Ok(())
+    }
+
+    /// Finalizes the CSV output by flushing all buffered records.
+    ///
+    /// Without this, buffered rows would only reach the destination when the
+    /// underlying `csv::Writer` is dropped, which discards any I/O error.
+    ///
+    /// # Returns
+    /// - `Ok(())` if all buffered data was written
+    /// - `Err(BatchError::ItemWriter)` if flushing the underlying writer failed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::csv::csv_writer::CsvItemWriterBuilder;
+    /// use spring_batch_rs::core::item::ItemWriter;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct Record { id: u32 }
+    ///
+    /// let mut buffer = Vec::new();
+    /// {
+    ///     let writer = CsvItemWriterBuilder::<Record>::new().from_writer(&mut buffer);
+    ///     writer.write(&[Record { id: 7 }]).unwrap();
+    ///     ItemWriter::<Record>::close(&writer).unwrap();
+    /// }
+    /// assert!(String::from_utf8(buffer).unwrap().contains('7'));
+    /// ```
+    fn close(&self) -> ItemWriterResult {
+        self.flush()
+    }
 }
 
 /// A builder for creating CSV item writers.
@@ -674,5 +730,47 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("name,value"), "file header missing");
         assert!(content.contains("alpha,1"), "file data missing");
+    }
+
+    #[test]
+    fn should_flush_pending_rows_on_close() {
+        #[derive(Serialize)]
+        struct Row {
+            name: String,
+            value: u32,
+        }
+
+        let mut buffer = Vec::new();
+        {
+            let writer = CsvItemWriterBuilder::<Row>::new()
+                .has_headers(true)
+                .from_writer(&mut buffer);
+
+            writer
+                .write(&[Row {
+                    name: "alpha".to_string(),
+                    value: 1,
+                }])
+                .unwrap();
+
+            // close() must make the data durable without relying on Drop
+            ItemWriter::<Row>::close(&writer).unwrap();
+        }
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("alpha,1"), "close did not flush: {output}");
+    }
+
+    #[test]
+    fn should_return_ok_from_open() {
+        #[derive(Serialize)]
+        struct Row {
+            name: String,
+        }
+
+        let mut buffer = Vec::new();
+        let writer = CsvItemWriterBuilder::<Row>::new().from_writer(&mut buffer);
+
+        assert!(ItemWriter::<Row>::open(&writer).is_ok());
     }
 }
