@@ -742,6 +742,17 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
         &self,
         step_execution: &mut StepExecution,
     ) -> Result<(Vec<I>, ChunkStatus), BatchError> {
+        let start = Instant::now();
+        let result = self.read_chunk_inner(step_execution);
+        step_execution.read_duration += start.elapsed();
+        result
+    }
+
+    // timed by the wrapper above
+    fn read_chunk_inner(
+        &self,
+        step_execution: &mut StepExecution,
+    ) -> Result<(Vec<I>, ChunkStatus), BatchError> {
         debug!("Start reading chunk");
 
         let mut read_items = Vec::with_capacity(self.chunk_size as usize);
@@ -795,6 +806,18 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
     /// - `Ok(Vec<W>)`: Vector of successfully processed items
     /// - `Err(BatchError)`: An error occurred and skip limit was reached
     fn process_chunk(
+        &self,
+        step_execution: &mut StepExecution,
+        read_items: Vec<I>,
+    ) -> Result<Vec<O>, BatchError> {
+        let start = Instant::now();
+        let result = self.process_chunk_inner(step_execution, read_items);
+        step_execution.process_duration += start.elapsed();
+        result
+    }
+
+    // timed by the wrapper above
+    fn process_chunk_inner(
         &self,
         step_execution: &mut StepExecution,
         read_items: Vec<I>,
@@ -1453,7 +1476,7 @@ mod tests {
         core::{
             item::{
                 ItemProcessor, ItemProcessorResult, ItemReader, ItemReaderResult, ItemWriter,
-                ItemWriterResult,
+                ItemWriterResult, PassThroughProcessor,
             },
             step::{StepExecution, StepStatus},
         },
@@ -1518,6 +1541,15 @@ mod tests {
         };
         *i += 1;
         Ok(Some(car))
+    }
+
+    fn sample_car() -> Option<Car> {
+        Some(Car {
+            year: 2024,
+            make: "Renault".to_string(),
+            model: "Zoe".to_string(),
+            description: "electric".to_string(),
+        })
     }
 
     fn mock_process(i: &mut u16, error_at: &[u16]) -> ItemProcessorResult<Car> {
@@ -3319,5 +3351,84 @@ mod tests {
         assert_eq!(step_execution.process_duration, Duration::ZERO);
         assert_eq!(step_execution.write_duration, Duration::ZERO);
         assert_eq!(step_execution.flush_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn should_record_nonzero_read_duration_after_step() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("read-timing")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("read-timing");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.read_duration >= Duration::from_millis(40),
+            "expected read_duration to cover 3 sleeping reads, got {:?}",
+            step_execution.read_duration
+        );
+    }
+
+    #[test]
+    fn should_attribute_slow_reads_to_read_duration_not_process() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("read-attribution")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("read-attribution");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.read_duration > step_execution.process_duration,
+            "a sleeping reader must not have its time attributed to process: read={:?} process={:?}",
+            step_execution.read_duration,
+            step_execution.process_duration
+        );
     }
 }
