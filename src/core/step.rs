@@ -356,6 +356,14 @@ pub struct StepExecution {
     pub filter_count: usize,
     /// Number of errors encountered during writing
     pub write_error_count: usize,
+    /// Cumulative time spent inside `ItemReader::read` calls, summed across all chunks
+    pub read_duration: Duration,
+    /// Cumulative time spent inside `ItemProcessor::process` calls, summed across all chunks
+    pub process_duration: Duration,
+    /// Cumulative time spent inside `ItemWriter::write` calls, summed across all chunks
+    pub write_duration: Duration,
+    /// Cumulative time spent inside `ItemWriter::flush` calls, summed across all chunks
+    pub flush_duration: Duration,
 }
 
 impl StepExecution {
@@ -392,6 +400,10 @@ impl StepExecution {
             process_error_count: 0,
             filter_count: 0,
             write_error_count: 0,
+            read_duration: Duration::ZERO,
+            process_duration: Duration::ZERO,
+            write_duration: Duration::ZERO,
+            flush_duration: Duration::ZERO,
         }
     }
 }
@@ -1434,6 +1446,7 @@ mod tests {
     use anyhow::Result;
     use mockall::mock;
     use serde::{Deserialize, Serialize};
+    use std::time::Duration;
 
     use crate::{
         BatchError,
@@ -3296,5 +3309,15 @@ mod tests {
         assert_eq!(step_execution.write_count, 0, "nothing should be written");
 
         Ok(())
+    }
+
+    #[test]
+    fn should_initialize_phase_durations_to_zero() {
+        let step_execution = StepExecution::new("phase-init");
+
+        assert_eq!(step_execution.read_duration, Duration::ZERO);
+        assert_eq!(step_execution.process_duration, Duration::ZERO);
+        assert_eq!(step_execution.write_duration, Duration::ZERO);
+        assert_eq!(step_execution.flush_duration, Duration::ZERO);
     }
 }
