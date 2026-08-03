@@ -23,6 +23,16 @@
 //! ```
 //!
 //! Set DATABASE_URL env var to override the default connection string.
+//!
+//! Set TOTAL_RECORDS to run at a different scale (defaults to 10 million):
+//!
+//! ```bash
+//! TOTAL_RECORDS=100000 cargo run --release --example benchmark_csv_postgres_xml \
+//!   --features csv,xml,rdbc-postgres 2>&1 | grep "Step '"
+//! ```
+//!
+//! Each step prints its per-phase timing breakdown (read / process / write / flush)
+//! on stderr via `StepExecution::phase_summary()`.
 
 use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
@@ -111,7 +121,19 @@ impl ItemProcessor<Transaction, Transaction> for TransactionProcessor {
 
 const CURRENCIES: [&str; 3] = ["USD", "EUR", "GBP"];
 const STATUSES: [&str; 4] = ["PENDING", "COMPLETED", "FAILED", "CANCELLED"];
-const TOTAL_RECORDS: u64 = 10_000_000;
+const DEFAULT_TOTAL_RECORDS: u64 = 10_000_000;
+
+/// Number of rows to generate, overridable with `TOTAL_RECORDS` so the benchmark can be
+/// run at several scales — useful for spotting non-linear behaviour such as `LIMIT/OFFSET`
+/// pagination degrading at large offsets.
+///
+/// Falls back to [`DEFAULT_TOTAL_RECORDS`] when unset or unparseable.
+fn total_records() -> u64 {
+    env::var("TOTAL_RECORDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_TOTAL_RECORDS)
+}
 
 /// Generates a CSV file with `count` random financial transaction rows.
 ///
@@ -379,14 +401,15 @@ async fn main() -> Result<(), BatchError> {
 
     // 4. Total wall time includes CSV generation
     let t_total = Instant::now();
+    let total_records = total_records();
 
     // 5. Generate CSV
     eprintln!(
         "[Generate] Writing {} rows to {} …",
-        TOTAL_RECORDS, csv_path
+        total_records, csv_path
     );
     let t_gen = Instant::now();
-    generate_csv(&csv_path, TOTAL_RECORDS)?;
+    generate_csv(&csv_path, total_records)?;
     eprintln!("[Generate] Done in {:.1}s", t_gen.elapsed().as_secs_f64());
     eprintln!();
 
@@ -523,10 +546,10 @@ async fn main() -> Result<(), BatchError> {
         "║  Total wall-clock time   : {:.1}s  (incl. CSV generation)",
         total_secs
     );
-    eprintln!("║  Records processed       : {}", TOTAL_RECORDS);
+    eprintln!("║  Records processed       : {}", total_records);
     eprintln!(
         "║  Average throughput      : {:.0} rec/s",
-        TOTAL_RECORDS as f64 / total_secs
+        total_records as f64 / total_secs
     );
     eprintln!("╚══════════════════════════════════════════════════════════╝");
     eprintln!();
