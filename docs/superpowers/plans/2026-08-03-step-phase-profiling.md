@@ -152,49 +152,48 @@ fn should_record_nonzero_read_duration_after_step() {
 }
 
 #[test]
-fn should_attribute_duration_to_the_correct_phase() {
+fn should_attribute_slow_reads_to_read_duration_not_process() {
     let mut reader = MockTestItemReader::default();
     let mut counter = 0u16;
     reader.expect_read().returning(move || {
+        std::thread::sleep(Duration::from_millis(30));
         counter += 1;
-        if counter > 3 { Ok(None) } else { Ok(sample_car()) }
+        if counter > 2 { Ok(None) } else { Ok(sample_car()) }
     });
 
     let processor = PassThroughProcessor::<Car>::new();
 
     let mut writer = MockTestItemWriter::default();
     writer.expect_open().returning(|| Ok(()));
-    writer.expect_write().returning(|_| {
-        std::thread::sleep(Duration::from_millis(50));
-        Ok(())
-    });
+    writer.expect_write().returning(|_| Ok(()));
     writer.expect_flush().returning(|| Ok(()));
     writer.expect_close().returning(|| Ok(()));
 
-    let step = StepBuilder::new("phase-attribution")
+    let step = StepBuilder::new("read-attribution")
         .chunk(10)
         .reader(&reader)
         .processor(&processor)
         .writer(&writer)
         .build();
 
-    let mut step_execution = StepExecution::new("phase-attribution");
+    let mut step_execution = StepExecution::new("read-attribution");
     step.execute(&mut step_execution).unwrap();
 
     assert!(
-        step_execution.write_duration > step_execution.read_duration,
-        "slow writer should dominate: write={:?} read={:?}",
-        step_execution.write_duration,
-        step_execution.read_duration
-    );
-    assert!(
-        step_execution.write_duration > step_execution.process_duration,
-        "slow writer should dominate: write={:?} process={:?}",
-        step_execution.write_duration,
+        step_execution.read_duration > step_execution.process_duration,
+        "a sleeping reader must not have its time attributed to process: read={:?} process={:?}",
+        step_execution.read_duration,
         step_execution.process_duration
     );
 }
 ```
+
+> **Plan correction (2026-08-03, during execution):** this slot originally held
+> `should_attribute_duration_to_the_correct_phase`, which asserted on `write_duration`.
+> That field is only populated by Task 3, so the test failed deterministically inside
+> Task 2 — a cross-task dependency the plan's self-review missed. The test has been moved
+> to Task 3 and replaced here by the read-vs-process equivalent above, which tests the same
+> guarantee using only what Task 2 builds.
 
 Add this helper next to the existing `mock_read` helper (`step.rs:1493`) if no equivalent exists:
 
@@ -318,6 +317,50 @@ fn should_record_flush_duration_separately_from_write() {
         "a slow flush must not be attributed to write: flush={:?} write={:?}",
         step_execution.flush_duration,
         step_execution.write_duration
+    );
+}
+
+#[test]
+fn should_attribute_duration_to_the_correct_phase() {
+    let mut reader = MockTestItemReader::default();
+    let mut counter = 0u16;
+    reader.expect_read().returning(move || {
+        counter += 1;
+        if counter > 3 { Ok(None) } else { Ok(sample_car()) }
+    });
+
+    let processor = PassThroughProcessor::<Car>::new();
+
+    let mut writer = MockTestItemWriter::default();
+    writer.expect_open().returning(|| Ok(()));
+    writer.expect_write().returning(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        Ok(())
+    });
+    writer.expect_flush().returning(|| Ok(()));
+    writer.expect_close().returning(|| Ok(()));
+
+    let step = StepBuilder::new("phase-attribution")
+        .chunk(10)
+        .reader(&reader)
+        .processor(&processor)
+        .writer(&writer)
+        .build();
+
+    let mut step_execution = StepExecution::new("phase-attribution");
+    step.execute(&mut step_execution).unwrap();
+
+    assert!(
+        step_execution.write_duration > step_execution.read_duration,
+        "slow writer should dominate: write={:?} read={:?}",
+        step_execution.write_duration,
+        step_execution.read_duration
+    );
+    assert!(
+        step_execution.write_duration > step_execution.process_duration,
+        "slow writer should dominate: write={:?} process={:?}",
+        step_execution.write_duration,
+        step_execution.process_duration
     );
 }
 
