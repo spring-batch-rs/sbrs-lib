@@ -317,6 +317,13 @@ impl<'a> TaskletBuilder<'a> {
 /// StepExecution tracks all relevant information about a step's execution,
 /// including timing, item counts, error counts, and current status.
 ///
+/// # Construction
+///
+/// This type is `#[non_exhaustive]`, so it cannot be built with a struct literal from
+/// outside the crate — use [`StepExecution::new`]. Fields stay public and freely
+/// readable; the attribute exists so that new metrics can be added in a minor release
+/// rather than a breaking one.
+///
 /// # Examples
 ///
 /// ```rust
@@ -329,6 +336,7 @@ impl<'a> TaskletBuilder<'a> {
 /// assert_eq!(step_execution.filter_count, 0);
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StepExecution {
     /// Unique identifier for this step instance
     pub id: Uuid,
