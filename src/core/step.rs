@@ -317,6 +317,13 @@ impl<'a> TaskletBuilder<'a> {
 /// StepExecution tracks all relevant information about a step's execution,
 /// including timing, item counts, error counts, and current status.
 ///
+/// # Construction
+///
+/// This type is `#[non_exhaustive]`, so it cannot be built with a struct literal from
+/// outside the crate — use [`StepExecution::new`]. Fields stay public and freely
+/// readable; the attribute exists so that new metrics can be added in a minor release
+/// rather than a breaking one.
+///
 /// # Examples
 ///
 /// ```rust
@@ -329,6 +336,7 @@ impl<'a> TaskletBuilder<'a> {
 /// assert_eq!(step_execution.filter_count, 0);
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StepExecution {
     /// Unique identifier for this step instance
     pub id: Uuid,
@@ -356,6 +364,21 @@ pub struct StepExecution {
     pub filter_count: usize,
     /// Number of errors encountered during writing
     pub write_error_count: usize,
+    /// Cumulative time spent in the read phase across all chunks. Covers the whole
+    /// per-chunk read loop, including the framework's buffering, not just `ItemReader::read`.
+    /// Only chunk-oriented steps populate this; tasklet steps leave it at zero.
+    pub read_duration: Duration,
+    /// Cumulative time spent in the process phase across all chunks. Covers the whole
+    /// per-chunk process loop, including collecting the results, not just `ItemProcessor::process`.
+    /// Only chunk-oriented steps populate this; tasklet steps leave it at zero.
+    pub process_duration: Duration,
+    /// Cumulative time spent in `ItemWriter::write` across all chunks, excluding the flush
+    /// that follows it. Only chunk-oriented steps populate this; tasklet steps leave it at zero.
+    pub write_duration: Duration,
+    /// Cumulative time spent in `ItemWriter::flush` across all chunks, measured separately
+    /// from [`StepExecution::write_duration`] so the cost of flushing once per chunk can be
+    /// quantified. Only chunk-oriented steps populate this; tasklet steps leave it at zero.
+    pub flush_duration: Duration,
 }
 
 impl StepExecution {
@@ -392,7 +415,63 @@ impl StepExecution {
             process_error_count: 0,
             filter_count: 0,
             write_error_count: 0,
+            read_duration: Duration::ZERO,
+            process_duration: Duration::ZERO,
+            write_duration: Duration::ZERO,
+            flush_duration: Duration::ZERO,
         }
+    }
+
+    /// Formats the per-phase timing breakdown as a single human-readable line.
+    ///
+    /// Percentages are relative to the step's total [`StepExecution::duration`].
+    /// When `duration` is `None` or zero — for instance before the step has run —
+    /// every percentage is reported as `0%` rather than `NaN`.
+    ///
+    /// The four phases will not sum to exactly 100%. The remainder holds the writer's
+    /// `open()` and `close()` calls — which is where the CSV, JSON and XML writers perform
+    /// their final flush — the teardown of each processed chunk, and the framework's own
+    /// bookkeeping. A large remainder is itself a useful signal.
+    ///
+    /// Only chunk-oriented steps populate the four phase fields. Calling this on a tasklet
+    /// step's execution yields a line whose phases all read `0.0s (0%)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use spring_batch_rs::core::step::StepExecution;
+    /// use std::time::Duration;
+    ///
+    /// let mut step_execution = StepExecution::new("load-postgres");
+    /// step_execution.duration = Some(Duration::from_secs(10));
+    /// step_execution.read_duration = Duration::from_secs(5);
+    ///
+    /// let summary = step_execution.phase_summary();
+    /// assert!(summary.contains("read 5.0s (50%)"));
+    /// ```
+    pub fn phase_summary(&self) -> String {
+        let total = self.duration.unwrap_or_default().as_secs_f64();
+        let pct = |d: Duration| -> f64 {
+            if total > 0.0 {
+                d.as_secs_f64() / total * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        format!(
+            "Step '{}' {:.1}s — read {:.1}s ({:.0}%) | process {:.1}s ({:.0}%) | write {:.1}s ({:.0}%) | flush {:.1}s ({:.0}%)",
+            self.name,
+            total,
+            self.read_duration.as_secs_f64(),
+            pct(self.read_duration),
+            self.process_duration.as_secs_f64(),
+            pct(self.process_duration),
+            self.write_duration.as_secs_f64(),
+            pct(self.write_duration),
+            self.flush_duration.as_secs_f64(),
+            pct(self.flush_duration),
+        )
     }
 }
 
@@ -660,6 +739,8 @@ impl<I, O> Step for ChunkOrientedStep<'_, I, O> {
         step_execution.end_time = Some(Instant::now());
         step_execution.duration = Some(start_time.elapsed());
 
+        info!("{}", step_execution.phase_summary());
+
         // Return the step execution details if the step is successful,
         // or an error if the step failed
         if StepStatus::Success == step_execution.status {
@@ -730,6 +811,17 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
         &self,
         step_execution: &mut StepExecution,
     ) -> Result<(Vec<I>, ChunkStatus), BatchError> {
+        let start = Instant::now();
+        let result = self.read_chunk_inner(step_execution);
+        step_execution.read_duration += start.elapsed();
+        result
+    }
+
+    // timed by the wrapper above
+    fn read_chunk_inner(
+        &self,
+        step_execution: &mut StepExecution,
+    ) -> Result<(Vec<I>, ChunkStatus), BatchError> {
         debug!("Start reading chunk");
 
         let mut read_items = Vec::with_capacity(self.chunk_size as usize);
@@ -787,6 +879,18 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
         step_execution: &mut StepExecution,
         read_items: Vec<I>,
     ) -> Result<Vec<O>, BatchError> {
+        let start = Instant::now();
+        let result = self.process_chunk_inner(step_execution, read_items);
+        step_execution.process_duration += start.elapsed();
+        result
+    }
+
+    // timed by the wrapper above
+    fn process_chunk_inner(
+        &self,
+        step_execution: &mut StepExecution,
+        read_items: Vec<I>,
+    ) -> Result<Vec<O>, BatchError> {
         debug!("Processing chunk of {} items", read_items.len());
         let mut result = Vec::with_capacity(read_items.len());
 
@@ -839,10 +943,19 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
             return Ok(());
         }
 
-        match self.writer.write(processed_items) {
+        let write_start = Instant::now();
+        let write_result = self.writer.write(processed_items);
+        step_execution.write_duration += write_start.elapsed();
+
+        match write_result {
             Ok(()) => {
                 step_execution.write_count += processed_items.len();
-                Self::manage_error(self.writer.flush());
+
+                let flush_start = Instant::now();
+                let flush_result = self.writer.flush();
+                step_execution.flush_duration += flush_start.elapsed();
+                Self::manage_error(flush_result);
+
                 Ok(())
             }
             Err(error) => {
@@ -1434,13 +1547,14 @@ mod tests {
     use anyhow::Result;
     use mockall::mock;
     use serde::{Deserialize, Serialize};
+    use std::time::Duration;
 
     use crate::{
         BatchError,
         core::{
             item::{
                 ItemProcessor, ItemProcessorResult, ItemReader, ItemReaderResult, ItemWriter,
-                ItemWriterResult,
+                ItemWriterResult, PassThroughProcessor,
             },
             step::{StepExecution, StepStatus},
         },
@@ -1505,6 +1619,15 @@ mod tests {
         };
         *i += 1;
         Ok(Some(car))
+    }
+
+    fn sample_car() -> Option<Car> {
+        Some(Car {
+            year: 2024,
+            make: "Renault".to_string(),
+            model: "Zoe".to_string(),
+            description: "electric".to_string(),
+        })
     }
 
     fn mock_process(i: &mut u16, error_at: &[u16]) -> ItemProcessorResult<Car> {
@@ -1880,6 +2003,41 @@ mod tests {
         assert!(!step_execution.id.is_nil());
 
         Ok(())
+    }
+
+    #[test]
+    fn should_format_phase_summary_with_percentages() {
+        let mut step_execution = StepExecution::new("load-postgres");
+        step_execution.duration = Some(Duration::from_secs(10));
+        step_execution.read_duration = Duration::from_secs(5);
+        step_execution.process_duration = Duration::from_secs(1);
+        step_execution.write_duration = Duration::from_secs(3);
+        step_execution.flush_duration = Duration::from_secs(1);
+
+        let summary = step_execution.phase_summary();
+
+        assert!(summary.contains("load-postgres"), "summary: {summary}");
+        assert!(summary.contains("read 5.0s (50%)"), "summary: {summary}");
+        assert!(summary.contains("process 1.0s (10%)"), "summary: {summary}");
+        assert!(summary.contains("write 3.0s (30%)"), "summary: {summary}");
+        assert!(summary.contains("flush 1.0s (10%)"), "summary: {summary}");
+    }
+
+    #[test]
+    fn should_report_zero_percentages_when_duration_is_unset() {
+        let step_execution = StepExecution::new("never-ran");
+
+        let summary = step_execution.phase_summary();
+
+        assert!(summary.contains("(0%)"), "summary: {summary}");
+        assert!(
+            !summary.contains("NaN"),
+            "division by zero leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("inf"),
+            "division by zero leaked: {summary}"
+        );
     }
 
     #[test]
@@ -3296,5 +3454,218 @@ mod tests {
         assert_eq!(step_execution.write_count, 0, "nothing should be written");
 
         Ok(())
+    }
+
+    #[test]
+    fn should_initialize_phase_durations_to_zero() {
+        let step_execution = StepExecution::new("phase-init");
+
+        assert_eq!(step_execution.read_duration, Duration::ZERO);
+        assert_eq!(step_execution.process_duration, Duration::ZERO);
+        assert_eq!(step_execution.write_duration, Duration::ZERO);
+        assert_eq!(step_execution.flush_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn should_record_nonzero_read_duration_after_step() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("read-timing")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("read-timing");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.read_duration >= Duration::from_millis(40),
+            "expected read_duration to cover 3 sleeping reads, got {:?}",
+            step_execution.read_duration
+        );
+    }
+
+    #[test]
+    fn should_attribute_slow_reads_to_read_duration_not_process() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("read-attribution")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("read-attribution");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.read_duration > step_execution.process_duration,
+            "a sleeping reader must not have its time attributed to process: read={:?} process={:?}",
+            step_execution.read_duration,
+            step_execution.process_duration
+        );
+    }
+
+    #[test]
+    fn should_record_flush_duration_separately_from_write() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| {
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(())
+        });
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("flush-timing")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("flush-timing");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.flush_duration >= Duration::from_millis(30),
+            "flush_duration should capture the sleeping flush, got {:?}",
+            step_execution.flush_duration
+        );
+        assert!(
+            step_execution.flush_duration > step_execution.write_duration,
+            "a slow flush must not be attributed to write: flush={:?} write={:?}",
+            step_execution.flush_duration,
+            step_execution.write_duration
+        );
+    }
+
+    #[test]
+    fn should_attribute_duration_to_the_correct_phase() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 3 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("phase-attribution")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("phase-attribution");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.write_duration > step_execution.read_duration,
+            "slow writer should dominate: write={:?} read={:?}",
+            step_execution.write_duration,
+            step_execution.read_duration
+        );
+        assert!(
+            step_execution.write_duration > step_execution.process_duration,
+            "slow writer should dominate: write={:?} process={:?}",
+            step_execution.write_duration,
+            step_execution.process_duration
+        );
+    }
+
+    #[test]
+    fn should_leave_write_duration_at_zero_for_empty_chunk() {
+        let mut reader = MockTestItemReader::default();
+        reader.expect_read().returning(|| Ok(None));
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("empty-chunk")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("empty-chunk");
+        step.execute(&mut step_execution).unwrap();
+
+        assert_eq!(
+            step_execution.write_duration,
+            Duration::ZERO,
+            "the empty-chunk early return skips the writer entirely"
+        );
+        assert_eq!(step_execution.flush_duration, Duration::ZERO);
     }
 }

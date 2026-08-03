@@ -202,6 +202,79 @@ impl<O: Serialize, W: Write> ItemWriter<O> for CsvItemWriter<O, W> {
             Err(error) => Err(BatchError::ItemWriter(error.to_string())),
         }
     }
+
+    /// Prepares the writer. CSV has no header ceremony to emit here — headers are
+    /// written lazily by the underlying `csv::Writer` on the first record — so this
+    /// is an explicit no-op provided for symmetry with the JSON and XML writers.
+    ///
+    /// # Returns
+    /// - `Ok(())` always
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::csv::csv_writer::CsvItemWriterBuilder;
+    /// use spring_batch_rs::core::item::ItemWriter;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct Record { id: u32 }
+    ///
+    /// let mut buffer = Vec::new();
+    /// let writer = CsvItemWriterBuilder::<Record>::new().from_writer(&mut buffer);
+    /// assert!(ItemWriter::<Record>::open(&writer).is_ok());
+    /// ```
+    fn open(&self) -> ItemWriterResult {
+        Ok(())
+    }
+
+    /// Finalizes the CSV output by flushing all buffered records.
+    ///
+    /// Without this, buffered rows would only reach the destination when the
+    /// underlying `csv::Writer` is dropped, which discards any I/O error.
+    ///
+    /// # Returns
+    /// - `Ok(())` if all buffered data was written
+    /// - `Err(BatchError::ItemWriter)` if flushing the underlying writer failed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::csv::csv_writer::CsvItemWriterBuilder;
+    /// use spring_batch_rs::core::item::ItemWriter;
+    /// use serde::Serialize;
+    /// use std::cell::RefCell;
+    /// use std::io::Write;
+    /// use std::rc::Rc;
+    ///
+    /// #[derive(Serialize)]
+    /// struct Record { id: u32 }
+    ///
+    /// // A sink whose contents stay readable while the writer is still alive,
+    /// // so the example can show that `close` — not `Drop` — did the flushing.
+    /// struct Sink(Rc<RefCell<Vec<u8>>>);
+    /// impl Write for Sink {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.borrow_mut().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// let sink = Rc::new(RefCell::new(Vec::new()));
+    /// let writer = CsvItemWriterBuilder::<Record>::new()
+    ///     .from_writer(Sink(Rc::clone(&sink)));
+    ///
+    /// writer.write(&[Record { id: 7 }]).unwrap();
+    /// assert!(sink.borrow().is_empty(), "csv::Writer still holds the row");
+    ///
+    /// ItemWriter::<Record>::close(&writer).unwrap();
+    ///
+    /// assert!(String::from_utf8(sink.borrow().clone()).unwrap().contains('7'));
+    /// ```
+    fn close(&self) -> ItemWriterResult {
+        self.flush()
+    }
 }
 
 /// A builder for creating CSV item writers.
@@ -674,5 +747,68 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("name,value"), "file header missing");
         assert!(content.contains("alpha,1"), "file data missing");
+    }
+
+    /// A `Write` sink whose contents the test can inspect while the writer is still alive.
+    #[derive(Clone)]
+    struct SharedBuffer(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_flush_pending_rows_on_close() {
+        #[derive(Serialize)]
+        struct Row {
+            name: String,
+            value: u32,
+        }
+
+        let shared = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writer = CsvItemWriterBuilder::<Row>::new()
+            .has_headers(true)
+            .from_writer(SharedBuffer(std::rc::Rc::clone(&shared)));
+
+        writer
+            .write(&[Row {
+                name: "alpha".to_string(),
+                value: 1,
+            }])
+            .unwrap();
+
+        // csv::Writer buffers internally, so nothing has reached the sink yet.
+        assert!(
+            shared.borrow().is_empty(),
+            "expected the row to still be buffered before close, sink already had: {:?}",
+            String::from_utf8_lossy(&shared.borrow())
+        );
+
+        ItemWriter::<Row>::close(&writer).unwrap();
+
+        // Read the sink while `writer` is still in scope — Drop has NOT run yet,
+        // so anything visible here was flushed by close() itself.
+        let output = String::from_utf8(shared.borrow().clone()).unwrap();
+        assert!(output.contains("alpha,1"), "close did not flush: {output}");
+    }
+
+    #[test]
+    fn should_return_ok_from_open() {
+        #[derive(Serialize)]
+        struct Row {
+            name: String,
+        }
+
+        let mut buffer = Vec::new();
+        let writer = CsvItemWriterBuilder::<Row>::new().from_writer(&mut buffer);
+
+        assert!(ItemWriter::<Row>::open(&writer).is_ok());
     }
 }

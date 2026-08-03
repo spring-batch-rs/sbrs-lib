@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Spring Batch RS is a Rust implementation of the Spring Batch framework for building enterprise-grade batch processing applications. It provides chunk-oriented processing, extensible readers/writers, and support for multiple data formats and databases.
 
-**Version**: 0.3.0
-**Language**: Rust 2021 Edition
+**Version**: 0.4.0
+**Language**: Rust 2024 Edition
 **Documentation**: https://spring-batch-rs.boussekeyt.dev/
 
 ## Essential Commands

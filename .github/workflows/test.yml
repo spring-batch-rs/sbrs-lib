@@ -39,10 +39,20 @@ jobs:
         env:
           RUSTFLAGS: "-Cinstrument-coverage"
 
+      # Diagnostic: nightly Cargo has moved build artefacts before (grcov's
+      # --binary-path broke when target/debug/deps/ stopped existing). If the
+      # next step fails again, this shows where the binaries actually landed.
+      - name: Show target layout
+        run: |
+          echo "--- target/debug (depth 2) ---"
+          find ./target/debug -maxdepth 2 -type d | head -30
+          echo "--- .profraw files ---"
+          find . -name '*.profraw' | head -5
+
       - name: Create coverage report
         run: |
           grcov . \
-            --binary-path ./target/debug/deps/ \
+            --binary-path ./target/debug/ \
             --source-dir . \
             --excl-start 'mod test* \{' \
             --ignore '*test*' \
