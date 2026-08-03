@@ -874,10 +874,19 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
             return Ok(());
         }
 
-        match self.writer.write(processed_items) {
+        let write_start = Instant::now();
+        let write_result = self.writer.write(processed_items);
+        step_execution.write_duration += write_start.elapsed();
+
+        match write_result {
             Ok(()) => {
                 step_execution.write_count += processed_items.len();
-                Self::manage_error(self.writer.flush());
+
+                let flush_start = Instant::now();
+                let flush_result = self.writer.flush();
+                step_execution.flush_duration += flush_start.elapsed();
+                Self::manage_error(flush_result);
+
                 Ok(())
             }
             Err(error) => {
@@ -3430,5 +3439,129 @@ mod tests {
             step_execution.read_duration,
             step_execution.process_duration
         );
+    }
+
+    #[test]
+    fn should_record_flush_duration_separately_from_write() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| {
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(())
+        });
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("flush-timing")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("flush-timing");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.flush_duration >= Duration::from_millis(30),
+            "flush_duration should capture the sleeping flush, got {:?}",
+            step_execution.flush_duration
+        );
+        assert!(
+            step_execution.flush_duration > step_execution.write_duration,
+            "a slow flush must not be attributed to write: flush={:?} write={:?}",
+            step_execution.flush_duration,
+            step_execution.write_duration
+        );
+    }
+
+    #[test]
+    fn should_attribute_duration_to_the_correct_phase() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 3 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("phase-attribution")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("phase-attribution");
+        step.execute(&mut step_execution).unwrap();
+
+        assert!(
+            step_execution.write_duration > step_execution.read_duration,
+            "slow writer should dominate: write={:?} read={:?}",
+            step_execution.write_duration,
+            step_execution.read_duration
+        );
+        assert!(
+            step_execution.write_duration > step_execution.process_duration,
+            "slow writer should dominate: write={:?} process={:?}",
+            step_execution.write_duration,
+            step_execution.process_duration
+        );
+    }
+
+    #[test]
+    fn should_leave_write_duration_at_zero_for_empty_chunk() {
+        let mut reader = MockTestItemReader::default();
+        reader.expect_read().returning(|| Ok(None));
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("empty-chunk")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("empty-chunk");
+        step.execute(&mut step_execution).unwrap();
+
+        assert_eq!(
+            step_execution.write_duration,
+            Duration::ZERO,
+            "the empty-chunk early return skips the writer entirely"
+        );
+        assert_eq!(step_execution.flush_duration, Duration::ZERO);
     }
 }
