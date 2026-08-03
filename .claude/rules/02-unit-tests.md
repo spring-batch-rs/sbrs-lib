@@ -23,7 +23,6 @@ Every source file in `src/` that contains public logic MUST have an inline `#[cf
 
 ## Files that MUST have inline tests added
 
-- `src/item/csv/csv_writer.rs` — no tests
 - `src/item/rdbc/postgres_reader.rs` — no tests (use mocks)
 - `src/item/rdbc/mysql_reader.rs` — no tests (use mocks)
 - `src/item/rdbc/sqlite_reader.rs` — no tests (use mocks)

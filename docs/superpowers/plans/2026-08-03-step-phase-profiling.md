@@ -820,8 +820,12 @@ Requires Docker (the example uses a PostgreSQL container).
 
 ```bash
 cargo run --release --example benchmark_csv_postgres_xml \
-  --features csv,xml,rdbc-postgres 2>&1 | grep "^Step"
+  --features csv,xml,rdbc-postgres 2>&1 | grep "Step '"
 ```
+
+The benchmark prints the breakdown itself on stderr via `phase_summary()`. Do not rely on the
+engine's `info!` line: `env_logger` defaults to level `error` when `RUST_LOG` is unset, so it is
+suppressed, and its `[timestamp LEVEL target]` prefix defeats an anchored `^Step` pattern anyway.
 
 Run at **100k, 1M and 10M rows** — check how the example parameterises row count and vary it. Three scales expose non-linear behaviour, such as `LIMIT/OFFSET` pagination degrading at large offsets (which is why keyset pagination exists in the readers).
 

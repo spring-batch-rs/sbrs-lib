@@ -356,13 +356,20 @@ pub struct StepExecution {
     pub filter_count: usize,
     /// Number of errors encountered during writing
     pub write_error_count: usize,
-    /// Cumulative time spent inside `ItemReader::read` calls, summed across all chunks
+    /// Cumulative time spent in the read phase across all chunks. Covers the whole
+    /// per-chunk read loop, including the framework's buffering, not just `ItemReader::read`.
+    /// Only chunk-oriented steps populate this; tasklet steps leave it at zero.
     pub read_duration: Duration,
-    /// Cumulative time spent inside `ItemProcessor::process` calls, summed across all chunks
+    /// Cumulative time spent in the process phase across all chunks. Covers the whole
+    /// per-chunk process loop, including collecting the results, not just `ItemProcessor::process`.
+    /// Only chunk-oriented steps populate this; tasklet steps leave it at zero.
     pub process_duration: Duration,
-    /// Cumulative time spent inside `ItemWriter::write` calls, summed across all chunks
+    /// Cumulative time spent in `ItemWriter::write` across all chunks, excluding the flush
+    /// that follows it. Only chunk-oriented steps populate this; tasklet steps leave it at zero.
     pub write_duration: Duration,
-    /// Cumulative time spent inside `ItemWriter::flush` calls, summed across all chunks
+    /// Cumulative time spent in `ItemWriter::flush` across all chunks, measured separately
+    /// from [`StepExecution::write_duration`] so the cost of flushing once per chunk can be
+    /// quantified. Only chunk-oriented steps populate this; tasklet steps leave it at zero.
     pub flush_duration: Duration,
 }
 
@@ -413,8 +420,13 @@ impl StepExecution {
     /// When `duration` is `None` or zero — for instance before the step has run —
     /// every percentage is reported as `0%` rather than `NaN`.
     ///
-    /// The four phases will not sum to exactly 100%: the remainder is framework
-    /// overhead. A large remainder is itself a useful signal.
+    /// The four phases will not sum to exactly 100%. The remainder holds the writer's
+    /// `open()` and `close()` calls — which is where the CSV, JSON and XML writers perform
+    /// their final flush — the teardown of each processed chunk, and the framework's own
+    /// bookkeeping. A large remainder is itself a useful signal.
+    ///
+    /// Only chunk-oriented steps populate the four phase fields. Calling this on a tasklet
+    /// step's execution yields a line whose phases all read `0.0s (0%)`.
     ///
     /// # Examples
     ///

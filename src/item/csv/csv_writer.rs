@@ -243,17 +243,34 @@ impl<O: Serialize, W: Write> ItemWriter<O> for CsvItemWriter<O, W> {
     /// use spring_batch_rs::item::csv::csv_writer::CsvItemWriterBuilder;
     /// use spring_batch_rs::core::item::ItemWriter;
     /// use serde::Serialize;
+    /// use std::cell::RefCell;
+    /// use std::io::Write;
+    /// use std::rc::Rc;
     ///
     /// #[derive(Serialize)]
     /// struct Record { id: u32 }
     ///
-    /// let mut buffer = Vec::new();
-    /// {
-    ///     let writer = CsvItemWriterBuilder::<Record>::new().from_writer(&mut buffer);
-    ///     writer.write(&[Record { id: 7 }]).unwrap();
-    ///     ItemWriter::<Record>::close(&writer).unwrap();
+    /// // A sink whose contents stay readable while the writer is still alive,
+    /// // so the example can show that `close` — not `Drop` — did the flushing.
+    /// struct Sink(Rc<RefCell<Vec<u8>>>);
+    /// impl Write for Sink {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.borrow_mut().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
     /// }
-    /// assert!(String::from_utf8(buffer).unwrap().contains('7'));
+    ///
+    /// let sink = Rc::new(RefCell::new(Vec::new()));
+    /// let writer = CsvItemWriterBuilder::<Record>::new()
+    ///     .from_writer(Sink(Rc::clone(&sink)));
+    ///
+    /// writer.write(&[Record { id: 7 }]).unwrap();
+    /// assert!(sink.borrow().is_empty(), "csv::Writer still holds the row");
+    ///
+    /// ItemWriter::<Record>::close(&writer).unwrap();
+    ///
+    /// assert!(String::from_utf8(sink.borrow().clone()).unwrap().contains('7'));
     /// ```
     fn close(&self) -> ItemWriterResult {
         self.flush()

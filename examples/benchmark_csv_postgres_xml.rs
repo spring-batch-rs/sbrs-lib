@@ -502,6 +502,9 @@ async fn main() -> Result<(), BatchError> {
             secs,
             exec.write_count as f64 / secs
         );
+        // Printed directly rather than relying on the `info!` summary, which is
+        // suppressed unless a logger is initialised at info level.
+        eprintln!("{}", exec.phase_summary());
         if exec.read_error_count > 0 || exec.write_error_count > 0 {
             eprintln!(
                 "[Step {}] WARNING: {} read errors, {} write errors skipped",

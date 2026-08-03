@@ -231,8 +231,20 @@ End-to-end, with Docker running:
 
 ```bash
 cargo run --release --example benchmark_csv_postgres_xml \
-  --features csv,xml,rdbc-postgres 2>&1 | grep "^Step"
+  --features csv,xml,rdbc-postgres 2>&1 | grep "Step '"
 ```
 
-Expected: three step summary lines, one per step, with the four phases summing to approximately
-the reported step duration.
+Expected: three summary lines, one per step, of the shape
+
+```text
+Step 'csv-to-postgres' 42.3s — read 18.1s (43%) | process 2.4s (6%) | write 21.1s (50%) | flush 0.7s (2%)
+```
+
+with the four phases summing to somewhat less than the reported step duration (see the residual
+note above).
+
+The benchmark prints these itself, on stderr, via `StepExecution::phase_summary()`. Do **not**
+rely on the `info!` summary the engine emits at step completion: `env_logger` defaults to level
+`error` when `RUST_LOG` is unset, so that record is suppressed, and when it is enabled the
+`[timestamp LEVEL target]` prefix means an anchored `^Step` pattern will never match. To see the
+engine's own log line instead, run with `RUST_LOG=info`.
