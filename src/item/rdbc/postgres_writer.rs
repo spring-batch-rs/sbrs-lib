@@ -45,6 +45,7 @@ pub struct PostgresItemWriter<O> {
     pub(crate) table: Option<String>,
     #[allow(clippy::type_complexity)]
     pub(crate) column_bindings: Vec<(String, Box<dyn Fn(&O) -> ColumnValue>)>,
+    pub(crate) concurrency: usize,
 }
 
 impl<O> PostgresItemWriter<O> {
@@ -54,7 +55,35 @@ impl<O> PostgresItemWriter<O> {
             pool: None,
             table: None,
             column_bindings: Vec::new(),
+            concurrency: 1,
         }
+    }
+
+    /// Returns how many chunk writes this writer may keep in flight at once.
+    ///
+    /// `1` — the default — means writes are sequential. See
+    /// [`RdbcItemWriterBuilder::with_concurrency`](crate::item::rdbc::RdbcItemWriterBuilder::with_concurrency).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::rdbc::RdbcItemWriterBuilder;
+    ///
+    /// let writer = RdbcItemWriterBuilder::<String>::new()
+    ///     .table("t")
+    ///     .column("v", |s: &String| s.as_str().into())
+    ///     .build_postgres();
+    ///
+    /// assert_eq!(writer.concurrency(), 1, "writes are sequential unless opted in");
+    /// ```
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// Sets how many chunk writes may be in flight at once.
+    pub(crate) fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
     }
 
     /// Sets the database connection pool for the writer.
