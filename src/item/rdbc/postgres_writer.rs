@@ -1,8 +1,11 @@
+use std::cell::RefCell;
+
 use serde::Serialize;
 use sqlx::{Pool, Postgres, QueryBuilder};
 
 use crate::core::item::{ItemWriter, ItemWriterResult};
 use crate::item::rdbc::ColumnValue;
+use crate::item::rdbc::inflight_writes::InflightWrites;
 
 use super::writer_common::{
     bind_column_value, create_write_error, log_write_success, max_items_per_batch, validate_config,
@@ -46,6 +49,11 @@ pub struct PostgresItemWriter<O> {
     #[allow(clippy::type_complexity)]
     pub(crate) column_bindings: Vec<(String, Box<dyn Fn(&O) -> ColumnValue>)>,
     pub(crate) concurrency: usize,
+    /// In-flight writes, created on first concurrent write.
+    ///
+    /// The `Option` is lazy initialisation: the table name is not known until
+    /// `write` runs. Stays `None` for the sequential path.
+    pub(crate) inflight: RefCell<Option<InflightWrites>>,
 }
 
 impl<O> PostgresItemWriter<O> {
@@ -56,6 +64,7 @@ impl<O> PostgresItemWriter<O> {
             table: None,
             column_bindings: Vec::new(),
             concurrency: 1,
+            inflight: RefCell::new(None),
         }
     }
 
@@ -115,18 +124,16 @@ impl<O> Default for PostgresItemWriter<O> {
     }
 }
 
-impl<O: Serialize + Clone> ItemWriter<O> for PostgresItemWriter<O> {
-    fn write(&self, items: &[O]) -> ItemWriterResult {
-        if items.is_empty() {
-            return Ok(());
-        }
-
-        let (pool, table) = validate_config(
-            self.pool.as_ref(),
-            self.table.as_deref(),
-            self.column_bindings.len(),
-        )?;
-
+impl<O> PostgresItemWriter<O> {
+    /// Writes the chunk with one blocking INSERT per bind-limited batch.
+    ///
+    /// This is the default path, taken whenever `concurrency <= 1`.
+    fn write_sequential(
+        &self,
+        pool: &Pool<Postgres>,
+        table: &str,
+        items: &[O],
+    ) -> ItemWriterResult {
         let col_names: Vec<&str> = self
             .column_bindings
             .iter()
@@ -161,6 +168,105 @@ impl<O: Serialize + Clone> ItemWriter<O> for PostgresItemWriter<O> {
 
         log_write_success(items.len(), table, "PostgreSQL");
         Ok(())
+    }
+
+    /// Dispatches the chunk as a task, bounded by `concurrency`.
+    ///
+    /// Column values are extracted here, on the calling thread, because the
+    /// extractor closures are not `Send`. Only the resulting `ColumnValue`s —
+    /// which are `Send + 'static` — cross into the spawned task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError::ItemWriter`](crate::BatchError::ItemWriter) if an
+    /// *earlier* write failed and was harvested while making room for this one.
+    fn write_concurrent(
+        &self,
+        pool: &Pool<Postgres>,
+        table: &str,
+        items: &[O],
+    ) -> ItemWriterResult {
+        let rows: Vec<Vec<ColumnValue>> = items
+            .iter()
+            .map(|item| {
+                self.column_bindings
+                    .iter()
+                    .map(|(_, extractor)| extractor(item))
+                    .collect()
+            })
+            .collect();
+
+        let col_list = self
+            .column_bindings
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let pool = pool.clone();
+        let table_owned = table.to_string();
+
+        let mut guard = self.inflight.borrow_mut();
+        let inflight = guard.get_or_insert_with(|| {
+            InflightWrites::new(self.concurrency, table.to_string(), "PostgreSQL")
+        });
+
+        inflight.spawn(async move {
+            let mut query_builder = QueryBuilder::new("INSERT INTO ");
+            query_builder.push(&table_owned);
+            query_builder.push(" (");
+            query_builder.push(&col_list);
+            query_builder.push(") ");
+            // `into_iter` rather than `iter`: bind_column_value! moves the value
+            // out of the enum, so consuming the rows avoids a clone per column
+            // on the hot path.
+            query_builder.push_values(rows, |mut b, row| {
+                for value in row {
+                    bind_column_value!(b, value);
+                }
+            });
+            query_builder.build().execute(&pool).await.map(|_| ())
+        })
+    }
+}
+
+impl<O: Serialize + Clone> ItemWriter<O> for PostgresItemWriter<O> {
+    fn write(&self, items: &[O]) -> ItemWriterResult {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let (pool, table) = validate_config(
+            self.pool.as_ref(),
+            self.table.as_deref(),
+            self.column_bindings.len(),
+        )?;
+
+        if self.concurrency <= 1 {
+            return self.write_sequential(pool, table, items);
+        }
+
+        self.write_concurrent(pool, table, items)
+    }
+
+    /// Collects results of finished writes without waiting.
+    ///
+    /// Deliberately non-blocking: the step engine calls this after every chunk,
+    /// so waiting here would serialise the concurrent path back into sequence.
+    /// Always `Ok` on the sequential path, which keeps nothing in flight.
+    fn flush(&self) -> ItemWriterResult {
+        match self.inflight.borrow_mut().as_mut() {
+            Some(inflight) => inflight.harvest(),
+            None => Ok(()),
+        }
+    }
+
+    /// Waits for every in-flight write and reports the first failure.
+    fn close(&self) -> ItemWriterResult {
+        match self.inflight.borrow_mut().as_mut() {
+            Some(inflight) => inflight.drain(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -216,6 +322,62 @@ mod tests {
         let result = writer.write(&["x".to_string()]);
         match result.err().unwrap() {
             BatchError::ItemWriter(msg) => assert!(msg.contains("pool"), "{msg}"),
+            e => panic!("expected ItemWriter, got {e:?}"),
+        }
+    }
+
+    // --- concurrency ---
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_take_the_sequential_path_when_concurrency_is_one() {
+        let writer = PostgresItemWriter::<String>::new();
+
+        // No pool configured: the sequential path must fail validation immediately
+        // rather than dispatching anything.
+        let result = writer.write(&["a".to_string()]);
+
+        assert!(result.is_err(), "no pool means validate_config must reject");
+        assert_eq!(writer.concurrency, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_report_no_error_from_flush_and_close_when_idle() {
+        let writer = PostgresItemWriter::<String>::new();
+
+        assert!(ItemWriter::<String>::flush(&writer).is_ok());
+        assert!(ItemWriter::<String>::close(&writer).is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_delay_the_write_error_to_close_when_concurrent() {
+        use crate::BatchError;
+
+        // A lazy pool never connects until a query runs, so every dispatched
+        // write fails — without needing a database to fail against.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgresql://nobody:nobody@127.0.0.1:1/nowhere")
+            .expect("a lazy pool is built without connecting");
+
+        let writer = PostgresItemWriter::<String>::new()
+            .with_concurrency(2)
+            .pool(&pool)
+            .table("t")
+            .add_column_binding("v".to_string(), Box::new(|s: &String| s.as_str().into()));
+
+        assert!(
+            writer.write(&["a".to_string()]).is_ok(),
+            "a concurrent write is dispatched, not awaited, so it cannot fail here"
+        );
+
+        let closed = ItemWriter::<String>::close(&writer);
+        assert!(
+            closed.is_err(),
+            "close() drains, so the failed write must surface there"
+        );
+        match closed.err().unwrap() {
+            BatchError::ItemWriter(msg) => assert!(msg.contains("PostgreSQL"), "{msg}"),
             e => panic!("expected ItemWriter, got {e:?}"),
         }
     }
