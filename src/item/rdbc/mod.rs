@@ -7,6 +7,9 @@ mod select_builder;
 /// Common utilities for database item writers.
 mod writer_common;
 
+/// Bounded concurrency for in-flight chunk writes.
+mod inflight_writes;
+
 /// Common utilities for database item readers.
 mod reader_common;
 
