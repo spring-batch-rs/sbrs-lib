@@ -186,16 +186,6 @@ impl<O> PostgresItemWriter<O> {
         table: &str,
         items: &[O],
     ) -> ItemWriterResult {
-        let rows: Vec<Vec<ColumnValue>> = items
-            .iter()
-            .map(|item| {
-                self.column_bindings
-                    .iter()
-                    .map(|(_, extractor)| extractor(item))
-                    .collect()
-            })
-            .collect();
-
         let col_list = self
             .column_bindings
             .iter()
@@ -203,30 +193,55 @@ impl<O> PostgresItemWriter<O> {
             .collect::<Vec<_>>()
             .join(",");
 
-        let pool = pool.clone();
-        let table_owned = table.to_string();
+        // Same bind-limit split as the sequential path: a chunk larger than the
+        // limit must become several INSERTs on both paths, or a chunk size that
+        // works sequentially would fail once concurrency is enabled.
+        let max_items = max_items_per_batch(self.column_bindings.len());
 
         let mut guard = self.inflight.borrow_mut();
         let inflight = guard.get_or_insert_with(|| {
             InflightWrites::new(self.concurrency, table.to_string(), "PostgreSQL")
         });
 
-        inflight.spawn(async move {
-            let mut query_builder = QueryBuilder::new("INSERT INTO ");
-            query_builder.push(&table_owned);
-            query_builder.push(" (");
-            query_builder.push(&col_list);
-            query_builder.push(") ");
-            // `into_iter` rather than `iter`: bind_column_value! moves the value
-            // out of the enum, so consuming the rows avoids a clone per column
-            // on the hot path.
-            query_builder.push_values(rows, |mut b, row| {
-                for value in row {
-                    bind_column_value!(b, value);
-                }
+        let mut first_error = Ok(());
+        for chunk in items.chunks(max_items) {
+            let batch: Vec<Vec<ColumnValue>> = chunk
+                .iter()
+                .map(|item| {
+                    self.column_bindings
+                        .iter()
+                        .map(|(_, extractor)| extractor(item))
+                        .collect()
+                })
+                .collect();
+
+            let pool = pool.clone();
+            let table_owned = table.to_string();
+            let col_list = col_list.clone();
+
+            let dispatched = inflight.spawn(async move {
+                let mut query_builder = QueryBuilder::new("INSERT INTO ");
+                query_builder.push(&table_owned);
+                query_builder.push(" (");
+                query_builder.push(&col_list);
+                query_builder.push(") ");
+                // `into_iter` rather than `iter`: bind_column_value! moves the value
+                // out of the enum, so consuming the rows avoids a clone per column
+                // on the hot path.
+                query_builder.push_values(batch, |mut b, row| {
+                    for value in row {
+                        bind_column_value!(b, value);
+                    }
+                });
+                query_builder.build().execute(&pool).await.map(|_| ())
             });
-            query_builder.build().execute(&pool).await.map(|_| ())
-        })
+
+            if dispatched.is_err() && first_error.is_ok() {
+                first_error = dispatched;
+            }
+        }
+
+        first_error
     }
 }
 
@@ -380,5 +395,36 @@ mod tests {
             BatchError::ItemWriter(msg) => assert!(msg.contains("PostgreSQL"), "{msg}"),
             e => panic!("expected ItemWriter, got {e:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_split_a_chunk_larger_than_the_bind_limit_when_concurrent() {
+        use crate::item::rdbc::writer_common::BIND_LIMIT;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgresql://nobody:nobody@127.0.0.1:1/nowhere")
+            .expect("a lazy pool is built without connecting");
+
+        let writer = PostgresItemWriter::<String>::new()
+            .with_concurrency(2)
+            .pool(&pool)
+            .table("t")
+            .add_column_binding("v".to_string(), Box::new(|s: &String| s.as_str().into()));
+
+        // One column, so the bind limit allows BIND_LIMIT rows per INSERT.
+        // Exceeding it must produce several INSERTs, exactly as the sequential
+        // path does, rather than one oversized statement.
+        let items = vec!["x".to_string(); BIND_LIMIT + 10];
+
+        assert!(
+            writer.write(&items).is_ok(),
+            "an oversized chunk must be split and dispatched, not rejected"
+        );
+        assert!(
+            ItemWriter::<String>::close(&writer).is_err(),
+            "the dead pool still fails every dispatched batch"
+        );
     }
 }
