@@ -91,6 +91,7 @@
 
 use crate::BatchError;
 use log::{debug, error, info, warn};
+use std::any::{Any, TypeId};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -667,12 +668,16 @@ pub enum RepeatStatus {
 /// let mut step_execution = StepExecution::new(step.get_name());
 /// let result = step.execute(&mut step_execution);
 /// ```
-pub struct ChunkOrientedStep<'a, I, O> {
+pub struct ChunkOrientedStep<'a, I, O>
+where
+    I: 'static,
+    O: 'static,
+{
     name: String,
     /// Component responsible for reading items from the source
     reader: &'a dyn ItemReader<I>,
     /// Component responsible for processing items
-    processor: &'a dyn ItemProcessor<I, O>,
+    processor: Option<&'a dyn ItemProcessor<I, O>>,
     /// Component responsible for writing items to the destination
     writer: &'a dyn ItemWriter<O>,
     /// Number of items to process in each chunk
@@ -681,8 +686,12 @@ pub struct ChunkOrientedStep<'a, I, O> {
     skip_limit: u16,
 }
 
-impl<I, O> Step for ChunkOrientedStep<'_, I, O> {
-    fn execute(&self, step_execution: &mut StepExecution) -> Result<(), BatchError> {
+impl<I: 'static, O> Step for ChunkOrientedStep<'_, I, O> {
+    fn execute(&self, step_execution: &mut StepExecution) -> Result<(), BatchError>
+    where
+        I: 'static,
+        O: 'static,
+    {
         // Start the timer and logging
         let start_time = Instant::now();
         info!(
@@ -755,7 +764,7 @@ impl<I, O> Step for ChunkOrientedStep<'_, I, O> {
     }
 }
 
-impl<I, O> ChunkOrientedStep<'_, I, O> {
+impl<I: 'static, O: 'static> ChunkOrientedStep<'_, I, O> {
     /// Processes a chunk of items and writes them.
     ///
     /// This method combines the processing and writing operations for a chunk,
@@ -878,7 +887,11 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
         &self,
         step_execution: &mut StepExecution,
         read_items: Vec<I>,
-    ) -> Result<Vec<O>, BatchError> {
+    ) -> Result<Vec<O>, BatchError>
+    where
+        I: 'static,
+        O: 'static,
+    {
         let start = Instant::now();
         let result = self.process_chunk_inner(step_execution, read_items);
         step_execution.process_duration += start.elapsed();
@@ -890,12 +903,40 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
         &self,
         step_execution: &mut StepExecution,
         read_items: Vec<I>,
-    ) -> Result<Vec<O>, BatchError> {
+    ) -> Result<Vec<O>, BatchError>
+    where
+        I: 'static,
+        O: 'static,
+    {
         debug!("Processing chunk of {} items", read_items.len());
+
+        // Fast path: no processor configured, and I/O are the same type,
+        // so items pass through unchanged.
+        if self.processor.is_none() {
+            return if TypeId::of::<I>() == TypeId::of::<O>() {
+                let result = read_items
+                    .into_iter()
+                    .map(|item| {
+                        let boxed: Box<dyn Any> = Box::new(item);
+                        *boxed
+                            .downcast::<O>()
+                            .expect("I and O verified equal above; downcast cannot fail")
+                    })
+                    .collect::<Vec<O>>();
+                Ok(result)
+            } else {
+                // No processor, and no way to turn an I into an O.
+                Err(BatchError::Configuration(
+                    "No processor configured but item and output types differ".into(),
+                ))
+            };
+        }
+
+        let processor = self.processor.as_ref().expect("Processor is present");
         let mut result = Vec::with_capacity(read_items.len());
 
         for item in read_items {
-            match self.processor.process(item) {
+            match processor.process(item) {
                 Ok(Some(processed_item)) => {
                     result.push(processed_item);
                     step_execution.process_count += 1;
@@ -909,7 +950,6 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
                     step_execution.process_error_count += 1;
 
                     if self.is_skip_limit_reached(step_execution) {
-                        // Set the status to ProcessorError when we hit the limit
                         step_execution.status = StepStatus::ProcessorError;
                         return Err(error);
                     }
@@ -1265,9 +1305,7 @@ impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
         ChunkOrientedStep {
             name: self.name,
             reader: self.reader.expect("Reader is required for building a step"),
-            processor: self
-                .processor
-                .expect("Processor is required for building a step"),
+            processor: self.processor,
             writer: self.writer.expect("Writer is required for building a step"),
             chunk_size: self.chunk_size,
             skip_limit: self.skip_limit,
@@ -3070,7 +3108,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_oriented_step_builder_should_panic_without_processor() {
+    fn chunk_oriented_step_builder_should_not_panic_without_processor() {
         let mut reader = MockTestItemReader::default();
         reader.expect_read().never();
 
@@ -3084,7 +3122,7 @@ mod tests {
                 .build()
         });
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
