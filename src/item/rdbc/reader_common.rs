@@ -36,7 +36,7 @@ use crate::core::item::ItemReaderResult;
 /// assert_eq!(calculate_page_index(100, None), 100);
 /// ```
 #[inline]
-pub fn calculate_page_index(offset: i32, page_size: Option<i32>) -> i32 {
+pub(super) fn calculate_page_index(offset: i32, page_size: Option<i32>) -> i32 {
     if let Some(page_size) = page_size {
         offset % page_size
     } else {
@@ -65,7 +65,7 @@ pub fn calculate_page_index(offset: i32, page_size: Option<i32>) -> i32 {
 /// assert_eq!(should_load_page(5), false); // Middle of page, use buffer
 /// ```
 #[inline]
-pub fn should_load_page(page_index: i32) -> bool {
+pub(super) fn should_load_page(page_index: i32) -> bool {
     page_index == 0
 }
 
@@ -77,7 +77,7 @@ pub fn should_load_page(page_index: i32) -> bool {
 ///
 /// Returns [`BatchError::ItemReader`] if `load_page` fails.
 #[allow(clippy::type_complexity)]
-pub fn read_item<I: Clone>(
+pub(super) fn read_item<I: Clone>(
     offset: &Cell<i32>,
     page_size: Option<i32>,
     buffer: &RefCell<Vec<I>>,

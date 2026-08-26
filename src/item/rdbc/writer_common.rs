@@ -7,7 +7,7 @@ use sqlx::{Database, Pool};
 
 /// The maximum number of parameters bound in a single SQL statement.
 /// This is the most conservative limit across major databases (MySQL's limit).
-pub const BIND_LIMIT: usize = 65535;
+pub(super) const BIND_LIMIT: usize = 65535;
 
 /// Type alias for the validated configuration returned by [`validate_config`].
 type ValidatedConfig<'a, DB> = (&'a Pool<DB>, &'a str);
@@ -17,7 +17,7 @@ type ValidatedConfig<'a, DB> = (&'a Pool<DB>, &'a str);
 /// # Errors
 ///
 /// Returns [`BatchError::ItemWriter`] if columns is zero, pool is `None`, or table is `None`.
-pub fn validate_config<'a, DB: Database>(
+pub(super) fn validate_config<'a, DB: Database>(
     pool: Option<&'a Pool<DB>>,
     table: Option<&'a str>,
     column_count: usize,
@@ -45,7 +45,7 @@ pub fn validate_config<'a, DB: Database>(
 /// * `table` - The table name
 /// * `db_name` - The database name (e.g., "PostgreSQL", "MySQL", "SQLite")
 #[inline]
-pub fn log_write_success(items_count: usize, table: &str, db_name: &str) {
+pub(super) fn log_write_success(items_count: usize, table: &str, db_name: &str) {
     log::debug!(
         "Successfully wrote {} items to {} table {}",
         items_count,
@@ -65,7 +65,11 @@ pub fn log_write_success(items_count: usize, table: &str, db_name: &str) {
 /// # Returns
 ///
 /// A [`BatchError::ItemWriter`] with a formatted error message.
-pub fn create_write_error(table: &str, db_name: &str, error: impl std::fmt::Display) -> BatchError {
+pub(super) fn create_write_error(
+    table: &str,
+    db_name: &str,
+    error: impl std::fmt::Display,
+) -> BatchError {
     log::error!(
         "Failed to write items to {} table {}: {}",
         db_name,
@@ -85,7 +89,7 @@ pub fn create_write_error(table: &str, db_name: &str, error: impl std::fmt::Disp
 ///
 /// `BIND_LIMIT / column_count`
 #[inline]
-pub fn max_items_per_batch(column_count: usize) -> usize {
+pub(super) fn max_items_per_batch(column_count: usize) -> usize {
     BIND_LIMIT / column_count
 }
 
