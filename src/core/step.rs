@@ -1037,12 +1037,10 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
 /// See the type-level documentation on [`ChunkOrientedStepBuilder`] for how
 /// this is used to make `.processor(...)` optional only when it is safe to
 /// do so (reader output type equals writer input type).
-#[derive(Debug, Default, Clone, Copy)]
 pub struct NoProcessor;
 
 /// Type-state marker indicating that a processor has been set on a
 /// [`ChunkOrientedStepBuilder`] via [`ChunkOrientedStepBuilder::processor`].
-#[derive(Debug, Default, Clone, Copy)]
 pub struct HasProcessor;
 
 pub struct ChunkOrientedStepBuilder<'a, I, O, P = NoProcessor> {
