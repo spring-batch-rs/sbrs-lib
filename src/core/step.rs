@@ -1634,12 +1634,30 @@ mod tests {
         }
     }
 
+    // A writer for a type unrelated to `Car`, used to exercise the
+    // no-processor fast path when reader and writer item types differ.
+    mock! {
+        pub TestTruckItemWriter {}
+        impl ItemWriter<Truck> for TestTruckItemWriter {
+            fn write(&self, items: &[Truck]) -> ItemWriterResult;
+            fn flush(&self) -> ItemWriterResult;
+            fn open(&self) -> ItemWriterResult;
+            fn close(&self) -> ItemWriterResult;
+        }
+    }
+
     #[derive(Deserialize, Serialize, Debug, Clone)]
     struct Car {
         year: u16,
         make: String,
         model: String,
         description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Truck {
+        #[allow(unused)]
+        payload_tons: u16,
     }
 
     fn mock_read(i: &mut u16, error_count: u16, end_count: u16) -> ItemReaderResult<Car> {
@@ -3141,6 +3159,73 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn step_should_fail_without_processor_when_reader_and_writer_types_differ() -> Result<()> {
+        let mut reader = MockTestItemReader::default();
+        reader
+            .expect_read()
+            .returning(|| Ok(Some(sample_car().unwrap())));
+
+        // Writer expects `Truck`, but the reader produces `Car`: with no
+        // processor to bridge the two types the step must fail before ever
+        // writing anything.
+        let mut writer = MockTestTruckItemWriter::default();
+        writer.expect_open().times(1).returning(|| Ok(()));
+        writer.expect_write().never();
+        writer.expect_close().times(1).returning(|| Ok(()));
+
+        let step = ChunkOrientedStepBuilder::new("test")
+            .reader(&reader)
+            .writer(&writer)
+            .chunk_size(3)
+            .build();
+
+        let mut step_execution = StepExecution::new(&step.name);
+
+        let result = step.execute(&mut step_execution);
+
+        assert!(result.is_err());
+        assert_eq!(step_execution.status, StepStatus::ProcessorError);
+
+        Ok(())
+    }
+
+    #[test]
+    fn step_should_succeed_without_processor_when_reader_and_writer_types_match() -> Result<()> {
+        let mut i = 0;
+        let mut reader = MockTestItemReader::default();
+        reader
+            .expect_read()
+            .returning(move || mock_read(&mut i, 0, 2)); // 2 items total
+
+        // No processor is configured: since reader and writer both deal in
+        // `Car`, items should pass through unchanged.
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().times(1).returning(|| Ok(()));
+        writer
+            .expect_write()
+            .withf(|items: &[Car]| items.len() == 2)
+            .times(1)
+            .returning(|_| Ok(()));
+        writer.expect_flush().times(1).returning(|| Ok(()));
+        writer.expect_close().times(1).returning(|| Ok(()));
+
+        let step = ChunkOrientedStepBuilder::new("test")
+            .reader(&reader)
+            .writer(&writer)
+            .chunk_size(3)
+            .build();
+
+        let mut step_execution = StepExecution::new(&step.name);
+
+        let result = step.execute(&mut step_execution);
+
+        assert!(result.is_ok());
+        assert_eq!(step_execution.status, StepStatus::Success);
+
+        Ok(())
     }
 
     #[test]
