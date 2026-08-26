@@ -31,7 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 
 ```rust
 use spring_batch_rs::{
-    core::{job::{Job, JobBuilder}, step::StepBuilder, item::PassThroughProcessor},
+    core::{job::{Job, JobBuilder}, step::StepBuilder},
     item::{
         csv::csv_reader::CsvItemReaderBuilder,
         json::json_writer::JsonItemWriterBuilder,
@@ -65,7 +65,7 @@ fn main() -> Result<(), BatchError> {
     let step = StepBuilder::new("csv-to-json")
         .chunk::<Order, Order>(100)
         .reader(&reader)
-        .processor(&PassThroughProcessor::<Order>::new())
+        // No processor as input object is the same as output object
         .writer(&writer)
         .skip_limit(5)
         .build();
