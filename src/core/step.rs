@@ -91,10 +91,11 @@
 
 use crate::BatchError;
 use log::{debug, error, info, warn};
+use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use super::item::{ItemProcessor, ItemReader, ItemWriter};
+use super::item::{ItemProcessor, ItemReader, ItemWriter, PassThroughProcessor};
 
 /// A tasklet represents a single task or operation that can be executed as part of a step.
 ///
@@ -633,16 +634,12 @@ pub enum RepeatStatus {
 ///
 /// ```rust
 /// use spring_batch_rs::core::step::{StepBuilder, StepExecution, Step};
-/// use spring_batch_rs::core::item::{ItemReader, ItemProcessor, ItemWriter, PassThroughProcessor};
+/// use spring_batch_rs::core::item::{ItemReader, ItemWriter};
 /// use spring_batch_rs::BatchError;
 ///
 /// # struct MyReader;
 /// # impl ItemReader<String> for MyReader {
 /// #     fn read(&self) -> Result<Option<String>, BatchError> { Ok(None) }
-/// # }
-/// # struct MyProcessor;
-/// # impl ItemProcessor<String, String> for MyProcessor {
-/// #     fn process(&self, item: String) -> Result<Option<String>, BatchError> { Ok(Some(item)) }
 /// # }
 /// # struct MyWriter;
 /// # impl ItemWriter<String> for MyWriter {
@@ -653,13 +650,12 @@ pub enum RepeatStatus {
 /// # }
 ///
 /// let reader = MyReader;
-/// let processor = PassThroughProcessor::<String>::new();
 /// let writer = MyWriter;
 ///
+/// // No processor needed: reader and writer both use `String`.
 /// let step = StepBuilder::new("my-step")
 ///     .chunk::<String, String>(100)                    // Process 100 items per chunk
 ///     .reader(&reader)
-///     .processor(&processor)
 ///     .writer(&writer)
 ///     .skip_limit(10)               // Allow up to 10 errors
 ///     .build();
@@ -1035,7 +1031,19 @@ impl<I, O> ChunkOrientedStep<'_, I, O> {
 ///     .skip_limit(25)
 ///     .build();
 /// ```
-pub struct ChunkOrientedStepBuilder<'a, I, O> {
+/// Type-state marker indicating that no processor has been set yet on a
+/// [`ChunkOrientedStepBuilder`].
+///
+/// See the type-level documentation on [`ChunkOrientedStepBuilder`] for how
+/// this is used to make `.processor(...)` optional only when it is safe to
+/// do so (reader output type equals writer input type).
+pub struct NoProcessor;
+
+/// Type-state marker indicating that a processor has been set on a
+/// [`ChunkOrientedStepBuilder`] via [`ChunkOrientedStepBuilder::processor`].
+pub struct HasProcessor;
+
+pub struct ChunkOrientedStepBuilder<'a, I, O, P = NoProcessor> {
     /// Name for the step
     name: String,
     /// Component responsible for reading items from the source
@@ -1048,9 +1056,11 @@ pub struct ChunkOrientedStepBuilder<'a, I, O> {
     chunk_size: u16,
     /// Maximum number of errors allowed before failing the step
     skip_limit: u16,
+    /// Type-state marker tracking whether `.processor(...)` has been called
+    _processor_state: PhantomData<P>,
 }
 
-impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
+impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O, NoProcessor> {
     /// Creates a new ChunkOrientedStepBuilder with the specified name.
     ///
     /// Sets default values:
@@ -1075,40 +1085,16 @@ impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
             writer: None,
             chunk_size: 10,
             skip_limit: 0,
+            _processor_state: PhantomData,
         }
-    }
-
-    /// Sets the item reader for this step.
-    ///
-    /// The reader is responsible for providing items to be processed.
-    /// This is a required component for chunk-oriented steps.
-    ///
-    /// # Parameters
-    /// - `reader`: Implementation of ItemReader that produces items of type `I`
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use spring_batch_rs::core::step::ChunkOrientedStepBuilder;
-    /// # use spring_batch_rs::core::item::ItemReader;
-    /// # use spring_batch_rs::BatchError;
-    /// # struct FileReader;
-    /// # impl ItemReader<String> for FileReader {
-    /// #     fn read(&self) -> Result<Option<String>, BatchError> { Ok(None) }
-    /// # }
-    /// let reader = FileReader;
-    /// let builder = ChunkOrientedStepBuilder::<String, String>::new("file-processing")
-    ///     .reader(&reader);
-    /// ```
-    pub fn reader(mut self, reader: &'a dyn ItemReader<I>) -> Self {
-        self.reader = Some(reader);
-        self
     }
 
     /// Sets the item processor for this step.
     ///
-    /// The processor transforms items from type `I` to type `O`.
-    /// This is a required component for chunk-oriented steps.
+    /// The processor transforms items from type `I` to type `O`. Setting a
+    /// processor is optional: when the reader's output type `I` and the
+    /// writer's input type `O` are the same, omitting this call falls back to
+    /// an internal identity processor in [`ChunkOrientedStepBuilder::build`].
     ///
     /// # Parameters
     /// - `processor`: Implementation of ItemProcessor that transforms items from `I` to `O`
@@ -1133,8 +1119,47 @@ impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
     ///     .reader(&reader)
     ///     .processor(&processor);
     /// ```
-    pub fn processor(mut self, processor: &'a dyn ItemProcessor<I, O>) -> Self {
-        self.processor = Some(processor);
+    pub fn processor(
+        self,
+        processor: &'a dyn ItemProcessor<I, O>,
+    ) -> ChunkOrientedStepBuilder<'a, I, O, HasProcessor> {
+        ChunkOrientedStepBuilder {
+            name: self.name,
+            reader: self.reader,
+            processor: Some(processor),
+            writer: self.writer,
+            chunk_size: self.chunk_size,
+            skip_limit: self.skip_limit,
+            _processor_state: PhantomData,
+        }
+    }
+}
+
+impl<'a, I, O, P> ChunkOrientedStepBuilder<'a, I, O, P> {
+    /// Sets the item reader for this step.
+    ///
+    /// The reader is responsible for providing items to be processed.
+    /// This is a required component for chunk-oriented steps.
+    ///
+    /// # Parameters
+    /// - `reader`: Implementation of ItemReader that produces items of type `I`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use spring_batch_rs::core::step::ChunkOrientedStepBuilder;
+    /// # use spring_batch_rs::core::item::ItemReader;
+    /// # use spring_batch_rs::BatchError;
+    /// # struct FileReader;
+    /// # impl ItemReader<String> for FileReader {
+    /// #     fn read(&self) -> Result<Option<String>, BatchError> { Ok(None) }
+    /// # }
+    /// let reader = FileReader;
+    /// let builder = ChunkOrientedStepBuilder::<String, String>::new("file-processing")
+    ///     .reader(&reader);
+    /// ```
+    pub fn reader(mut self, reader: &'a dyn ItemReader<I>) -> Self {
+        self.reader = Some(reader);
         self
     }
 
@@ -1222,11 +1247,14 @@ impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
         self.skip_limit = skip_limit;
         self
     }
+}
 
-    /// Builds the ChunkOrientedStep instance.
+impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O, HasProcessor> {
+    /// Builds the ChunkOrientedStep instance using the processor set via
+    /// [`ChunkOrientedStepBuilder::processor`].
     ///
     /// # Panics
-    /// Panics if any required component (reader, processor, writer) has not been set.
+    /// Panics if the reader or the writer has not been set.
     ///
     /// # Examples
     ///
@@ -1268,6 +1296,57 @@ impl<'a, I, O> ChunkOrientedStepBuilder<'a, I, O> {
             processor: self
                 .processor
                 .expect("Processor is required for building a step"),
+            writer: self.writer.expect("Writer is required for building a step"),
+            chunk_size: self.chunk_size,
+            skip_limit: self.skip_limit,
+        }
+    }
+}
+
+impl<'a, I> ChunkOrientedStepBuilder<'a, I, I, NoProcessor> {
+    /// Builds the ChunkOrientedStep instance, falling back to an internal
+    /// identity processor since no processor was set.
+    ///
+    /// This overload is only available when the reader's output type `I` and
+    /// the writer's input type `O` are the same type: the fallback processor
+    /// returns each item unchanged, so `I` and `O` must match. If they differ
+    /// and no processor was set via [`ChunkOrientedStepBuilder::processor`],
+    /// this method is not applicable and the call to `.build()` fails to
+    /// compile.
+    ///
+    /// # Panics
+    /// Panics if the reader or the writer has not been set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use spring_batch_rs::core::step::ChunkOrientedStepBuilder;
+    /// # use spring_batch_rs::core::item::{ItemReader, ItemWriter};
+    /// # use spring_batch_rs::BatchError;
+    /// # struct MyReader;
+    /// # impl ItemReader<String> for MyReader {
+    /// #     fn read(&self) -> Result<Option<String>, BatchError> { Ok(None) }
+    /// # }
+    /// # struct MyWriter;
+    /// # impl ItemWriter<String> for MyWriter {
+    /// #     fn write(&self, items: &[String]) -> Result<(), BatchError> { Ok(()) }
+    /// #     fn flush(&self) -> Result<(), BatchError> { Ok(()) }
+    /// #     fn open(&self) -> Result<(), BatchError> { Ok(()) }
+    /// #     fn close(&self) -> Result<(), BatchError> { Ok(()) }
+    /// # }
+    /// let reader = MyReader;
+    /// let writer = MyWriter;
+    ///
+    /// let step = ChunkOrientedStepBuilder::new("pass-through-step")
+    ///     .reader(&reader)
+    ///     .writer(&writer)
+    ///     .build();
+    /// ```
+    pub fn build(self) -> ChunkOrientedStep<'a, I, I> {
+        ChunkOrientedStep {
+            name: self.name,
+            reader: self.reader.expect("Reader is required for building a step"),
+            processor: Box::leak(Box::new(PassThroughProcessor::new())),
             writer: self.writer.expect("Writer is required for building a step"),
             chunk_size: self.chunk_size,
             skip_limit: self.skip_limit,
@@ -3070,21 +3149,65 @@ mod tests {
     }
 
     #[test]
-    fn chunk_oriented_step_builder_should_panic_without_processor() {
+    fn chunk_oriented_step_builder_should_build_without_processor_when_types_match() {
+        // Car -> Car: reader and writer item types are identical, so omitting
+        // .processor(...) is allowed and falls back to PassThroughProcessor.
         let mut reader = MockTestItemReader::default();
-        reader.expect_read().never();
+        reader.expect_read().returning(|| Ok(None));
 
         let mut writer = MockTestItemWriter::default();
-        writer.expect_open().never();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
 
-        let result = std::panic::catch_unwind(|| {
-            ChunkOrientedStepBuilder::new("test")
-                .reader(&reader)
-                .writer(&writer)
-                .build()
+        let step = ChunkOrientedStepBuilder::new("test")
+            .reader(&reader)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new(step.get_name());
+        let result = step.execute(&mut step_execution);
+        assert!(
+            result.is_ok(),
+            "step with no processor should run fine when I == O"
+        );
+    }
+
+    #[test]
+    fn chunk_oriented_step_builder_without_processor_passes_items_through_unchanged() {
+        let mut reader = MockTestItemReader::default();
+        let mut call = 0;
+        reader.expect_read().returning(move || {
+            call += 1;
+            if call == 1 {
+                Ok(Some(Car {
+                    year: 2020,
+                    make: "Toyota".to_string(),
+                    model: "Corolla".to_string(),
+                    description: "unchanged".to_string(),
+                }))
+            } else {
+                Ok(None)
+            }
         });
 
-        assert!(result.is_err());
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_write().returning(|items: &[Car]| {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].description, "unchanged");
+            Ok(())
+        });
+
+        let step = ChunkOrientedStepBuilder::new("test")
+            .reader(&reader)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new(step.get_name());
+        step.execute(&mut step_execution)
+            .expect("step should complete successfully");
     }
 
     #[test]

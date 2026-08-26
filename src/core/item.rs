@@ -224,58 +224,34 @@ pub trait ItemWriter<O> {
 
 /// A pass-through processor that returns items unchanged.
 ///
-/// This processor implements the identity function for batch processing pipelines.
-/// It takes an input item and returns it unchanged, making it useful for scenarios
-/// where you need a processor in the pipeline but don't want to transform the data.
+/// Internal identity-function processor. [`ChunkOrientedStepBuilder::build`](crate::core::step::ChunkOrientedStepBuilder::build)
+/// uses it as the implicit processor when `.processor(...)` is not called and the
+/// reader's output type matches the writer's input type — callers never need to
+/// name this type directly.
 ///
 /// # Type Parameters
 ///
 /// - `T`: The item type that will be passed through unchanged.
 ///
-/// # Use Cases
-///
-/// - Testing batch processing pipelines without data transformation
-/// - Placeholder processor during development
-/// - Pipelines where processing logic is conditional and sometimes bypassed
-/// - Maintaining consistent pipeline structure when transformation is optional
-///
 /// # Performance
 ///
 /// This processor takes ownership of the item and returns it directly,
 /// with no allocation or clone.
-///
-/// # Examples
-///
-/// ```
-/// use spring_batch_rs::core::item::{ItemProcessor, PassThroughProcessor};
-///
-/// let processor = PassThroughProcessor::<String>::new();
-/// let result = processor.process("Hello, World!".to_string()).unwrap();
-/// assert_eq!(result, Some("Hello, World!".to_string()));
-/// ```
-///
-/// Using with different data types:
-///
-/// ```
-/// use spring_batch_rs::core::item::{ItemProcessor, PassThroughProcessor};
-///
-/// let int_processor = PassThroughProcessor::<i32>::new();
-/// let result = int_processor.process(42).unwrap();
-/// assert_eq!(result, Some(42));
-///
-/// #[derive(PartialEq, Debug)]
-/// struct Person {
-///     name: String,
-///     age: u32,
-/// }
-///
-/// let person_processor = PassThroughProcessor::<Person>::new();
-/// let result = person_processor.process(Person { name: "Alice".to_string(), age: 30 }).unwrap();
-/// assert_eq!(result, Some(Person { name: "Alice".to_string(), age: 30 }));
-/// ```
-#[derive(Default)]
-pub struct PassThroughProcessor<T> {
+pub(crate) struct PassThroughProcessor<T> {
     _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for PassThroughProcessor<T> {
+    /// Returns a new `PassThroughProcessor`.
+    ///
+    /// Implemented manually (rather than via `#[derive(Default)]`) so that
+    /// `Default` is available for every `T`, not just `T: Default`.
+    /// `PhantomData<T>` does not require `T: Default` to construct, but the
+    /// derive macro adds that bound anyway since it can't see through
+    /// `PhantomData`.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> ItemProcessor<T, T> for PassThroughProcessor<T> {
@@ -286,16 +262,6 @@ impl<T> ItemProcessor<T, T> for PassThroughProcessor<T> {
     ///
     /// # Returns
     /// - `Ok(Some(item))` - Always succeeds and returns the input item
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use spring_batch_rs::core::item::{ItemProcessor, PassThroughProcessor};
-    ///
-    /// let processor = PassThroughProcessor::<Vec<i32>>::new();
-    /// let result = processor.process(vec![1, 2, 3]).unwrap();
-    /// assert_eq!(result, Some(vec![1, 2, 3]));
-    /// ```
     fn process(&self, item: T) -> ItemProcessorResult<T> {
         Ok(Some(item))
     }
@@ -307,14 +273,9 @@ impl<T> PassThroughProcessor<T> {
     /// # Returns
     /// A new instance of `PassThroughProcessor` that will pass through items of type `T`.
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// use spring_batch_rs::core::item::PassThroughProcessor;
-    ///
-    /// let processor = PassThroughProcessor::<String>::new();
-    /// ```
-    pub fn new() -> Self {
+    /// `const fn` so instances can be created in const contexts (e.g. a
+    /// crate-level `static` for a fixed, non-generic `T`).
+    pub(crate) const fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
         }

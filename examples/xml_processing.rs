@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -124,12 +124,9 @@ fn example_read_xml_to_json() -> Result<(), BatchError> {
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Book>::new();
-
     let step = StepBuilder::new("xml-to-json")
         .chunk::<Book, Book>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -167,12 +164,9 @@ fn example_write_xml() -> Result<(), BatchError> {
         .item_tag("person")
         .from_path(&output_path)?;
 
-    let processor = PassThroughProcessor::<Person>::new();
-
     let step = StepBuilder::new("create-xml")
         .chunk::<Person, Person>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -272,12 +266,9 @@ fn example_xml_to_xml() -> Result<(), BatchError> {
         .item_tag("item")
         .from_path(&output_path)?;
 
-    let processor = PassThroughProcessor::<Book>::new();
-
     let step = StepBuilder::new("xml-to-xml")
         .chunk::<Book, Book>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 

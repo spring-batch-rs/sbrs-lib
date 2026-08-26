@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{CompositeItemWriterBuilder, PassThroughProcessor},
+        item::CompositeItemWriterBuilder,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -71,22 +71,18 @@ id,name,price
         .link(json_writer)
         .build();
 
-    // 4. Pass-through processor — items are not transformed
-    let processor = PassThroughProcessor::<Product>::new();
-
-    // 5. Build step
+    // 4. Build step (no processor needed — items are not transformed)
     let step = StepBuilder::new("fan-out-products")
         .chunk::<Product, Product>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&composite)
         .build();
 
-    // 6. Run job
+    // 5. Run job
     let job = JobBuilder::new().start(&step).build();
     job.run()?;
 
-    // 7. Report results
+    // 6. Report results
     let exec = job.get_step_execution("fan-out-products").unwrap(); // step name is always registered after successful job.run()
     println!("JSON output: {}", output.display());
     println!("Read:      {}", exec.read_count); // 5

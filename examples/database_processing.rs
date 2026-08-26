@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -144,12 +144,10 @@ fn example_read_from_database(pool: &SqlitePool) -> Result<(), BatchError> {
         .build_sqlite();
 
     let writer = LoggerWriterBuilder::<User>::new().build();
-    let processor = PassThroughProcessor::<User>::new();
 
     let step = StepBuilder::new("read-users")
         .chunk::<User, User>(2)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -180,12 +178,9 @@ fn example_database_to_json(pool: &SqlitePool) -> Result<(), BatchError> {
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<User>::new();
-
     let step = StepBuilder::new("export-to-json")
         .chunk::<User, User>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -215,12 +210,9 @@ fn example_database_to_csv(pool: &SqlitePool) -> Result<(), BatchError> {
         .has_headers(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<User>::new();
-
     let step = StepBuilder::new("export-to-csv")
         .chunk::<User, User>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -261,12 +253,9 @@ id,name,price,stock
         .column("stock", |p: &Product| p.stock.into())
         .build_sqlite();
 
-    let processor = PassThroughProcessor::<Product>::new();
-
     let step = StepBuilder::new("import-products")
         .chunk::<Product, Product>(2)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 

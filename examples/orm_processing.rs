@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, ItemReader, PassThroughProcessor},
+        item::{ItemProcessor, ItemReader},
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -177,12 +177,9 @@ fn example_read_all_to_json(db: &DatabaseConnection) -> Result<(), BatchError> {
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<products::Model>::new();
-
     let step = StepBuilder::new("read-all-products")
         .chunk::<products::Model, products::Model>(5)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -259,12 +256,9 @@ fn example_read_expensive_products(db: &DatabaseConnection) -> Result<(), BatchE
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<products::Model>::new();
-
     let step = StepBuilder::new("expensive-products")
         .chunk::<products::Model, products::Model>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -358,12 +352,9 @@ fn example_verify_written_data(db: &DatabaseConnection) -> Result<(), BatchError
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<products::Model>::new();
-
     let step = StepBuilder::new("verify-written")
         .chunk::<products::Model, products::Model>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 

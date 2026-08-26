@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -88,12 +88,9 @@ id,name,price,category
         .has_headers(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Product>::new();
-
     let step = StepBuilder::new("csv-to-csv")
         .chunk::<Product, Product>(2)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -172,12 +169,9 @@ id;name;price;category
         .delimiter(b';')
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Product>::new();
-
     let step = StepBuilder::new("semicolon-csv")
         .chunk::<Product, Product>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -212,12 +206,9 @@ id,name,price,category
     let output_path = temp_dir().join("products_valid.json");
     let writer = JsonItemWriterBuilder::<Product>::new().from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Product>::new();
-
     let step = StepBuilder::new("fault-tolerant-csv")
         .chunk::<Product, Product>(2)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .skip_limit(1) // Allow up to 1 read error
         .build();

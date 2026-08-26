@@ -9,7 +9,7 @@ use mongodb::{
 use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     core::{
-        item::{ItemProcessor, ItemProcessorResult, PassThroughProcessor},
+        item::{ItemProcessor, ItemProcessorResult},
         job::{Job, JobBuilder},
         step::{StepBuilder, StepStatus},
     },
@@ -232,13 +232,10 @@ fn write_items_to_database() -> Result<()> {
         .collection(&book_collection)
         .build();
 
-    let processor = PassThroughProcessor::<FormattedBook>::new();
-
     // Execute process
     let step = StepBuilder::new("test")
         .chunk::<FormattedBook, FormattedBook>(3)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
