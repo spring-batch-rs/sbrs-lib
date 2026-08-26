@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -109,12 +109,10 @@ fn example_read_json_array() -> Result<(), BatchError> {
     let reader = JsonItemReaderBuilder::<Order>::new().from_reader(Cursor::new(json_data));
 
     let writer = LoggerWriterBuilder::<Order>::new().build();
-    let processor = PassThroughProcessor::<Order>::new();
 
     let step = StepBuilder::new("read-json-array")
         .chunk::<Order, Order>(2)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -222,12 +220,9 @@ fn example_json_formatting() -> Result<(), BatchError> {
     let writer1 = JsonItemWriterBuilder::<Order>::new()
         .pretty_formatter(false)
         .from_path(&compact_path);
-    let processor1 = PassThroughProcessor::<Order>::new();
-
     let step1 = StepBuilder::new("compact-json")
         .chunk::<Order, Order>(10)
         .reader(&reader1)
-        .processor(&processor1)
         .writer(&writer1)
         .build();
 
@@ -237,12 +232,9 @@ fn example_json_formatting() -> Result<(), BatchError> {
     let writer2 = JsonItemWriterBuilder::<Order>::new()
         .pretty_formatter(true)
         .from_path(&pretty_path);
-    let processor2 = PassThroughProcessor::<Order>::new();
-
     let step2 = StepBuilder::new("pretty-json")
         .chunk::<Order, Order>(10)
         .reader(&reader2)
-        .processor(&processor2)
         .writer(&writer2)
         .build();
 

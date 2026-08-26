@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, ItemReader, PassThroughProcessor},
+        item::{ItemProcessor, ItemReader},
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -291,12 +291,10 @@ fn example_parallel_conversion() -> Result<(), BatchError> {
     let json_writer = JsonItemWriterBuilder::<ValidTransaction>::new()
         .pretty_formatter(true)
         .from_path(&json_path);
-    let json_processor = PassThroughProcessor::<ValidTransaction>::new();
 
     let json_step = StepBuilder::new("export-json")
         .chunk::<ValidTransaction, ValidTransaction>(10)
         .reader(&json_reader)
-        .processor(&json_processor)
         .writer(&json_writer)
         .build();
 
@@ -306,12 +304,10 @@ fn example_parallel_conversion() -> Result<(), BatchError> {
     let csv_writer = CsvItemWriterBuilder::<ValidTransaction>::new()
         .has_headers(true)
         .from_path(&csv_path);
-    let csv_processor = PassThroughProcessor::<ValidTransaction>::new();
 
     let csv_step = StepBuilder::new("export-csv")
         .chunk::<ValidTransaction, ValidTransaction>(10)
         .reader(&csv_reader)
-        .processor(&csv_processor)
         .writer(&csv_writer)
         .build();
 
@@ -399,12 +395,10 @@ fn example_aggregation_pipeline() -> Result<(), BatchError> {
     let writer = CsvItemWriterBuilder::<TransactionSummary>::new()
         .has_headers(true)
         .from_path(&output_path);
-    let processor = PassThroughProcessor::<TransactionSummary>::new();
 
     let step = StepBuilder::new("write-summaries")
         .chunk::<TransactionSummary, TransactionSummary>(10)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 

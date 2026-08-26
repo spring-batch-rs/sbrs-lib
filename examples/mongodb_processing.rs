@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -185,12 +185,9 @@ fn example_read_all_to_json(collection: &Collection<Book>) -> Result<(), BatchEr
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Book>::new();
-
     let step = StepBuilder::new("read-all-books")
         .chunk::<Book, Book>(5)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -299,12 +296,9 @@ fn example_read_recent_books(collection: &Collection<Book>) -> Result<(), BatchE
         .pretty_formatter(true)
         .from_path(&output_path);
 
-    let processor = PassThroughProcessor::<Book>::new();
-
     let step = StepBuilder::new("read-recent-books")
         .chunk::<Book, Book>(5)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 

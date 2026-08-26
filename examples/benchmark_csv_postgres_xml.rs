@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     BatchError,
     core::{
-        item::{ItemProcessor, PassThroughProcessor},
+        item::ItemProcessor,
         job::{Job, JobBuilder},
         step::StepBuilder,
     },
@@ -460,11 +460,9 @@ async fn main() -> Result<(), BatchError> {
         .item_tag("transaction")
         .from_path(&xml_path)
         .map_err(|e| BatchError::ItemWriter(e.to_string()))?;
-    let processor2 = PassThroughProcessor::<Transaction>::new();
     let step2 = StepBuilder::new("postgres-to-xml")
         .chunk::<Transaction, Transaction>(1_000)
         .reader(&pg_reader)
-        .processor(&processor2)
         .writer(&xml_writer)
         .build();
 
@@ -490,11 +488,10 @@ async fn main() -> Result<(), BatchError> {
         .column("status", |t: &Transaction| t.status.clone().into())
         .column("amount_eur", |t: &Transaction| t.amount_eur.into())
         .build_postgres();
-    let processor3 = PassThroughProcessor::<Transaction>::new();
+
     let step3 = StepBuilder::new("xml-to-postgres-import")
         .chunk::<Transaction, Transaction>(1_000)
         .reader(&xml_reader)
-        .processor(&processor3)
         .writer(&pg_writer2)
         .build();
 

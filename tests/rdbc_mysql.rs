@@ -10,7 +10,7 @@ use helpers::{
 use serde::{Deserialize, Serialize};
 use spring_batch_rs::{
     core::{
-        item::{ItemReader, PassThroughProcessor},
+        item::ItemReader,
         job::{Job, JobBuilder},
         step::{StepBuilder, StepStatus},
     },
@@ -97,13 +97,10 @@ async fn read_items_from_database() -> Result<(), Error> {
         .has_headers(true)
         .from_writer(tmpfile.as_file());
 
-    let processor = PassThroughProcessor::new();
-
     // Execute process
     let step = StepBuilder::new("test")
         .chunk::<Person, Person>(DEFAULT_CHUNK_SIZE)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
@@ -160,13 +157,10 @@ async fn write_items_to_database() -> Result<(), Error> {
         .column("description", |c: &Car| c.description.as_str().into())
         .build_mysql();
 
-    let processor = PassThroughProcessor::<Car>::new();
-
     // Execute process
     let step = StepBuilder::new("test")
         .chunk::<Car, Car>(DEFAULT_CHUNK_SIZE)
         .reader(&reader)
-        .processor(&processor)
         .writer(&writer)
         .build();
 
