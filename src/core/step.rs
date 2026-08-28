@@ -721,8 +721,13 @@ impl<I, O> Step for ChunkOrientedStep<'_, I, O> {
             }
         }
 
-        // Close the writer and handle any errors
-        Self::manage_error(self.writer.close());
+        // A failing close() means buffered or in-flight writes never landed.
+        // Treat it as fatal: reporting Success here would hide data loss.
+        let close_result = self.writer.close();
+        if let Err(ref error) = close_result {
+            warn!("Error closing writer: {}", error);
+            step_execution.status = StepStatus::WriteError;
+        }
 
         // Log the end of the step
         info!(
@@ -2399,9 +2404,10 @@ mod tests {
 
         let result = step.execute(&mut step_execution);
 
-        // The step should still succeed as close errors are managed
-        assert!(result.is_ok());
-        assert_eq!(step_execution.status, StepStatus::Success);
+        // A failing close() means writes never landed. Reporting Success here
+        // would hide data loss, so the step must fail.
+        assert!(result.is_err());
+        assert_eq!(step_execution.status, StepStatus::WriteError);
 
         Ok(())
     }
@@ -3411,11 +3417,44 @@ mod tests {
 
         let result = step.execute(&mut step_execution);
 
-        // Should still succeed as open/close errors are managed
-        assert!(result.is_ok());
-        assert_eq!(step_execution.status, StepStatus::Success);
+        // open() failing stays non-fatal; close() failing is what fails the step.
+        assert!(result.is_err());
+        assert_eq!(step_execution.status, StepStatus::WriteError);
 
         Ok(())
+    }
+
+    #[test]
+    fn should_not_fail_the_step_when_only_open_fails() {
+        let mut reader = MockTestItemReader::default();
+        reader.expect_read().return_once(|| Ok(None));
+
+        let mut processor = MockTestProcessor::default();
+        processor.expect_process().never();
+
+        let mut writer = MockTestItemWriter::default();
+        writer
+            .expect_open()
+            .times(1)
+            .returning(|| Err(BatchError::ItemWriter("open error".to_string())));
+        writer.expect_write().never();
+        writer.expect_close().times(1).returning(|| Ok(()));
+
+        let step = StepBuilder::new("open-fails-only")
+            .chunk(3)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new(&step.name);
+        let result = step.execute(&mut step_execution);
+
+        assert!(
+            result.is_ok(),
+            "a failing open() must stay non-fatal; only close() became fatal"
+        );
+        assert_eq!(step_execution.status, StepStatus::Success);
     }
 
     #[test]
@@ -3790,5 +3829,78 @@ mod tests {
             "the empty-chunk early return skips the writer entirely"
         );
         assert_eq!(step_execution.flush_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn should_fail_the_step_when_close_fails() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer
+            .expect_close()
+            .returning(|| Err(BatchError::ItemWriter("close failed".to_string())));
+
+        let step = StepBuilder::new("close-fails")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("close-fails");
+        let result = step.execute(&mut step_execution);
+
+        assert!(
+            result.is_err(),
+            "a failing close() must fail the step, otherwise unwritten data is reported as success"
+        );
+        assert_eq!(step_execution.status, StepStatus::WriteError);
+    }
+
+    #[test]
+    fn should_still_succeed_when_close_succeeds() {
+        let mut reader = MockTestItemReader::default();
+        let mut counter = 0u16;
+        reader.expect_read().returning(move || {
+            counter += 1;
+            if counter > 2 {
+                Ok(None)
+            } else {
+                Ok(sample_car())
+            }
+        });
+
+        let processor = PassThroughProcessor::<Car>::new();
+
+        let mut writer = MockTestItemWriter::default();
+        writer.expect_open().returning(|| Ok(()));
+        writer.expect_write().returning(|_| Ok(()));
+        writer.expect_flush().returning(|| Ok(()));
+        writer.expect_close().returning(|| Ok(()));
+
+        let step = StepBuilder::new("close-ok")
+            .chunk(10)
+            .reader(&reader)
+            .processor(&processor)
+            .writer(&writer)
+            .build();
+
+        let mut step_execution = StepExecution::new("close-ok");
+        assert!(step.execute(&mut step_execution).is_ok());
+        assert_eq!(step_execution.status, StepStatus::Success);
     }
 }

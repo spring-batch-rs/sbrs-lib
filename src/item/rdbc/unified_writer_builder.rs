@@ -102,6 +102,7 @@ pub struct RdbcItemWriterBuilder<O> {
     table: Option<String>,
     #[allow(clippy::type_complexity)]
     column_bindings: Vec<(String, Box<dyn Fn(&O) -> ColumnValue>)>,
+    concurrency: usize,
 }
 
 impl<O> RdbcItemWriterBuilder<O> {
@@ -113,6 +114,7 @@ impl<O> RdbcItemWriterBuilder<O> {
             sqlite_pool: None,
             table: None,
             column_bindings: Vec::new(),
+            concurrency: 1,
         }
     }
 
@@ -199,6 +201,48 @@ impl<O> RdbcItemWriterBuilder<O> {
         self
     }
 
+    /// Sets how many chunk writes may be in flight at once.
+    ///
+    /// Defaults to `1`, which keeps the sequential behaviour: each `write` call
+    /// completes its INSERT before returning. Values above `1` dispatch writes
+    /// concurrently over the connection pool, which changes two observable things:
+    ///
+    /// - Chunks are no longer written in order.
+    /// - A write error surfaces on a later `write` call, or at `close`, rather than
+    ///   the call that dispatched it. `skip_limit` therefore applies with a delay of
+    ///   up to `concurrency` chunks.
+    ///
+    /// Only PostgreSQL and MySQL honour this. SQLite serialises writes behind a
+    /// database-level lock, so [`build_sqlite`](Self::build_sqlite) ignores the setting
+    /// and logs a warning.
+    ///
+    /// Keep this at or below the connection pool size; extra tasks would only queue
+    /// waiting for a connection.
+    ///
+    /// # Arguments
+    /// * `concurrency` - Maximum number of chunk writes in flight. `0` is treated as `1`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spring_batch_rs::item::rdbc::RdbcItemWriterBuilder;
+    /// use spring_batch_rs::item::rdbc::ColumnValue;
+    ///
+    /// struct Order { id: i32 }
+    ///
+    /// let writer = RdbcItemWriterBuilder::<Order>::new()
+    ///     .table("orders")
+    ///     .column("id", |o: &Order| ColumnValue::Int(o.id as i64))
+    ///     .with_concurrency(4)
+    ///     .build_postgres();
+    ///
+    /// assert_eq!(writer.concurrency(), 4);
+    /// ```
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+
     /// Adds a column mapping for the writer.
     ///
     /// The `extractor` closure is called once per item per write, and must return
@@ -250,7 +294,7 @@ impl<O> RdbcItemWriterBuilder<O> {
     /// # }
     /// ```
     pub fn build_postgres(self) -> PostgresItemWriter<O> {
-        let mut writer = PostgresItemWriter::new();
+        let mut writer = PostgresItemWriter::new().with_concurrency(self.concurrency);
 
         if let Some(pool) = self.postgres_pool {
             writer = writer.pool(&pool);
@@ -289,7 +333,7 @@ impl<O> RdbcItemWriterBuilder<O> {
     /// # }
     /// ```
     pub fn build_mysql(self) -> MySqlItemWriter<O> {
-        let mut writer = MySqlItemWriter::new();
+        let mut writer = MySqlItemWriter::new().with_concurrency(self.concurrency);
 
         if let Some(pool) = self.mysql_pool {
             writer = writer.pool(&pool);
@@ -328,6 +372,14 @@ impl<O> RdbcItemWriterBuilder<O> {
     /// # }
     /// ```
     pub fn build_sqlite(self) -> SqliteItemWriter<O> {
+        if self.concurrency > 1 {
+            log::warn!(
+                "with_concurrency({}) ignored for SQLite: writes are serialised by a \
+                 database-level lock, so concurrency would add no throughput",
+                self.concurrency
+            );
+        }
+
         let mut writer = SqliteItemWriter::new();
 
         if let Some(pool) = self.sqlite_pool {
@@ -505,5 +557,56 @@ mod tests {
             ),
             e => panic!("expected ItemWriter, got {e:?}"),
         }
+    }
+
+    // --- concurrency ---
+
+    #[test]
+    fn should_default_concurrency_to_one() {
+        let writer = RdbcItemWriterBuilder::<User>::new()
+            .table("items")
+            .column("id", |u: &User| ColumnValue::Int(u.id as i64))
+            .build_postgres();
+
+        assert_eq!(
+            writer.concurrency, 1,
+            "default must be sequential so nobody opts in by accident"
+        );
+    }
+
+    #[test]
+    fn should_carry_configured_concurrency_to_the_writer() {
+        let writer = RdbcItemWriterBuilder::<User>::new()
+            .table("items")
+            .column("id", |u: &User| ColumnValue::Int(u.id as i64))
+            .with_concurrency(4)
+            .build_postgres();
+
+        assert_eq!(writer.concurrency, 4);
+    }
+
+    #[test]
+    fn should_carry_configured_concurrency_to_the_mysql_writer() {
+        let writer = RdbcItemWriterBuilder::<User>::new()
+            .table("items")
+            .column("id", |u: &User| ColumnValue::Int(u.id as i64))
+            .with_concurrency(4)
+            .build_mysql();
+
+        assert_eq!(writer.concurrency, 4);
+    }
+
+    #[test]
+    fn should_force_sqlite_to_stay_sequential() {
+        let writer = RdbcItemWriterBuilder::<User>::new()
+            .table("items")
+            .column("id", |u: &User| ColumnValue::Int(u.id as i64))
+            .with_concurrency(8)
+            .build_sqlite();
+
+        // SqliteItemWriter has no concurrency field at all — this test asserts the
+        // builder compiles and yields a working writer, i.e. the setting is
+        // accepted and ignored rather than rejected.
+        assert!(writer.table.is_some());
     }
 }

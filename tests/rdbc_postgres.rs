@@ -149,6 +149,68 @@ async fn write_items_to_database() -> Result<(), Error> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn should_write_every_row_with_concurrency() -> Result<(), Error> {
+    const ROW_COUNT: usize = 10_000;
+
+    // Prepare container
+    let container = postgres::Postgres::default().start().await?;
+    let host_ip = container.get_host().await?;
+    let host_port = container.get_host_port_ipv4(5432).await?;
+
+    let connection_uri = format!("postgres://postgres:postgres@{}:{}", host_ip, host_port);
+    let pool = PgPool::connect(&connection_uri).await?;
+
+    sqlx::query(CREATE_CARS_TABLE_SQL).execute(&pool).await?;
+
+    // Prepare reader: a CSV large enough to span many chunks
+    let mut csv = String::from("year,make,model,description\n");
+    for i in 0..ROW_COUNT {
+        csv.push_str(&format!("2020,make-{i},model-{i},row-{i}\n"));
+    }
+    let reader = CsvItemReaderBuilder::<Car>::new()
+        .has_headers(true)
+        .from_reader(csv.as_bytes());
+
+    // Prepare writer with several chunk writes in flight
+    let writer = RdbcItemWriterBuilder::<Car>::new()
+        .postgres(&pool)
+        .table("cars")
+        .column("year", |c: &Car| c.year.into())
+        .column("make", |c: &Car| c.make.as_str().into())
+        .column("model", |c: &Car| c.model.as_str().into())
+        .column("description", |c: &Car| c.description.as_str().into())
+        .with_concurrency(4)
+        .build_postgres();
+
+    let processor = PassThroughProcessor::<Car>::new();
+
+    let step = StepBuilder::new("concurrent-write")
+        .chunk::<Car, Car>(500)
+        .reader(&reader)
+        .processor(&processor)
+        .writer(&writer)
+        .build();
+
+    let job = JobBuilder::new().start(&step).build();
+    assert!(job.run().is_ok(), "job must succeed");
+
+    let step_execution = job.get_step_execution("concurrent-write").unwrap();
+    assert_eq!(step_execution.status, StepStatus::Success);
+    assert_eq!(step_execution.write_error_count, 0);
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cars")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(
+        count, ROW_COUNT as i64,
+        "concurrent writes must not lose or duplicate rows"
+    );
+
+    Ok(())
+}
+
 // --- PostgresRdbcItemReader-specific tests (migrated from src/) ---
 
 use spring_batch_rs::item::rdbc::PostgresRdbcItemReader;

@@ -31,6 +31,16 @@
 //!   --features csv,xml,rdbc-postgres 2>&1 | grep "Step '"
 //! ```
 //!
+//! Set WRITE_CONCURRENCY to allow several chunk INSERTs in flight at once on the two
+//! PostgreSQL write steps (defaults to 1, i.e. sequential). Keep it at or below the
+//! connection pool size:
+//!
+//! ```bash
+//! TOTAL_RECORDS=1000000 WRITE_CONCURRENCY=4 \
+//!   cargo run --release --example benchmark_csv_postgres_xml \
+//!   --features csv,xml,rdbc-postgres 2>&1 | grep "Step '"
+//! ```
+//!
 //! Each step prints its per-phase timing breakdown (read / process / write / flush)
 //! on stderr via `StepExecution::phase_summary()`.
 
@@ -133,6 +143,15 @@ fn total_records() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_TOTAL_RECORDS)
+}
+
+/// Number of chunk writes allowed in flight, via `WRITE_CONCURRENCY`. Defaults to 1
+/// (sequential), matching the writer's own default.
+fn write_concurrency() -> usize {
+    env::var("WRITE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }
 
 /// Generates a CSV file with `count` random financial transaction rows.
@@ -434,6 +453,7 @@ async fn main() -> Result<(), BatchError> {
         .column("account_to", |t: &Transaction| t.account_to.clone().into())
         .column("status", |t: &Transaction| t.status.clone().into())
         .column("amount_eur", |t: &Transaction| t.amount_eur.into())
+        .with_concurrency(write_concurrency())
         .build_postgres();
     let processor1 = TransactionProcessor;
     let step1 = StepBuilder::new("csv-to-postgres")
@@ -487,6 +507,7 @@ async fn main() -> Result<(), BatchError> {
         .column("account_to", |t: &Transaction| t.account_to.clone().into())
         .column("status", |t: &Transaction| t.status.clone().into())
         .column("amount_eur", |t: &Transaction| t.amount_eur.into())
+        .with_concurrency(write_concurrency())
         .build_postgres();
 
     let step3 = StepBuilder::new("xml-to-postgres-import")
